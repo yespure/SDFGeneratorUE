@@ -4,6 +4,97 @@
 #include "Rendering/SkeletalMeshModel.h"
 #include "Rendering/SkeletalMeshLODModel.h"
 
+
+static void ClearBottomLeftEarUV(
+    TArray<uint8>& Pixels,
+    int32 Resolution)
+{
+    if (Resolution <= 0 ||
+        Pixels.Num() != Resolution * Resolution)
+    {
+        return;
+    }
+
+    /*
+     * Unreal纹理坐标通常为：
+     *
+     * U = 0：最左边
+     * U = 1：最右边
+     * V = 0：最上边
+     * V = 1：最下边
+     *
+     * 所以左下角是：
+     * U较小，V较大。
+     */
+    const float EarMinU = 0.0f;
+    const float EarMaxU = 0.20f;
+    const float EarMinV = 0.75f;
+    const float EarMaxV = 1.0f;
+
+    for (int32 Y = 0; Y < Resolution; ++Y)
+    {
+        for (int32 X = 0; X < Resolution; ++X)
+        {
+            const float U = (static_cast<float>(X) + 0.5f) / static_cast<float>(Resolution);
+            const float V = (static_cast<float>(Y) + 0.5f) / static_cast<float>(Resolution);
+            const bool bIsEarRegion =
+                U >= EarMinU &&
+                U <= EarMaxU &&
+                V >= EarMinV &&
+                V <= EarMaxV;
+
+            if (bIsEarRegion)
+            {
+                const int32 PixelIndex =
+                    Y * Resolution + X;
+
+                
+                Pixels[PixelIndex] = 0;
+            }
+        }
+    }
+}
+
+ bool FFaceSDFGenerator::RayIntersectsTriangle(
+    const FVector3f& RayOrigin,
+    const FVector3f& RayDirection,
+    const FFaceSDFTriangle& Triangle)
+{
+    const FVector3f Edge1 = Triangle.Position1 - Triangle.Position0;
+    const FVector3f Edge2 = Triangle.Position2 - Triangle.Position0;
+    const FVector3f P = FVector3f::CrossProduct(RayDirection, Edge2);
+
+    const float Det = FVector3f::DotProduct(Edge1, P);
+
+    if (FMath::Abs(Det) < 0.000001f)
+    {
+        return false;
+    }
+
+    const float InvDet = 1.0f / Det;
+    const FVector3f T = RayOrigin - Triangle.Position0;
+    const float U = FVector3f::DotProduct(T, P) * InvDet;
+
+    if (U < 0.0f || U > 1.0f)
+    {
+        return false;
+    }
+
+    const FVector3f Q = FVector3f::CrossProduct(T, Edge1);
+    const float V = FVector3f::DotProduct(RayDirection, Q) * InvDet;
+
+    if (V < 0.0f || U + V > 1.0f)
+    {
+        return false;
+    }
+
+    const float Distance =
+        FVector3f::DotProduct(Edge2, Q) * InvDet;
+
+    return Distance > 0.0001f;
+}
+
+
 bool FFaceSDFGenerator::ExtractFaceTriangles(
     USkeletalMesh* Mesh,
     int32 LODIndex,
@@ -144,6 +235,16 @@ bool FFaceSDFGenerator::ExtractFaceTriangles(
             Vertex2.UVs[UVChannel].X,
             Vertex2.UVs[UVChannel].Y);//获取三角形的三个顶点的UV坐标
 
+        // 获取三角形三个顶点的位置
+        Triangle.Position0 = Vertex0.Position;
+        Triangle.Position1 = Vertex1.Position;
+        Triangle.Position2 = Vertex2.Position;
+
+        // 获取三角形三个顶点的法线
+        Triangle.Normal0 = Vertex0.TangentZ;
+        Triangle.Normal1 = Vertex1.TangentZ;
+        Triangle.Normal2 = Vertex2.TangentZ;
+
         OutTriangles.Add(Triangle);
     }
 
@@ -152,8 +253,9 @@ bool FFaceSDFGenerator::ExtractFaceTriangles(
 
 
 //模型光栅化
-bool FFaceSDFGenerator::RasterizeFaceMask(
+bool FFaceSDFGenerator::RasterizeShadowMask(
     const TArray<FFaceSDFTriangle>& Triangles,
+    const FVector3f& LightDirection,
     int32 Resolution,
     TArray<uint8>& OutPixels)
 {
@@ -272,14 +374,74 @@ bool FFaceSDFGenerator::RasterizeFaceMask(
                     const int32 PixelIndex =
                         Y * Width + X;
 
-                    OutPixels[PixelIndex] = 255;//将像素设置为白色，表示在三角形内
+                    // 计算当前像素在三角形中的权重
+                    const float W0 = CrossBC / Cross;
+                    const float W1 = CrossCA / Cross;
+                    const float W2 = CrossAB / Cross;
+
+                    // 获取当前像素对应的面部法线
+                    const FVector3f SurfaceNormal =
+                        (
+                            Triangle.Normal0 * W0 +
+                            Triangle.Normal1 * W1 +
+                            Triangle.Normal2 * W2
+                            ).GetSafeNormal();
+
+                    // 计算当前像素是否朝向光源
+                    const FVector3f L =
+                        LightDirection.GetSafeNormal();
+
+                    const float NdotL =
+                        FVector3f::DotProduct(SurfaceNormal, L);
+
+                    const float LightThreshold = 0.25f;
+
+                    bool bIsLit =
+                        NdotL > LightThreshold;
+
+                    if (bIsLit)
+                    {
+                        const FVector3f SurfacePosition =
+                            Triangle.Position0 * W0 +
+                            Triangle.Position1 * W1 +
+                            Triangle.Position2 * W2;
+
+                        const FVector3f RayOrigin = SurfacePosition + SurfaceNormal * 0.01f;
+
+                        for (const FFaceSDFTriangle& OtherTriangle : Triangles)
+                        {
+                            if (&OtherTriangle == &Triangle)
+                            {
+                                continue;
+                            }
+
+                            if (RayIntersectsTriangle(
+                                RayOrigin,
+                                L,
+                                OtherTriangle))
+                            {
+                                bIsLit = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    OutPixels[PixelIndex] = bIsLit ? 255 : 0;
                 }
             }
         }
     }
 
-    UE_LOG(LogTemp, Warning,
-        TEXT("Face SDF: Rasterization finished. Resolution=%d, Triangles=%d"),
+    ClearBottomLeftEarUV(
+        OutPixels,
+        Resolution);
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT(
+            "Face SDF: Rasterization finished. "
+            "Resolution=%d, Triangles=%d"),
         Resolution,
         Triangles.Num());
 

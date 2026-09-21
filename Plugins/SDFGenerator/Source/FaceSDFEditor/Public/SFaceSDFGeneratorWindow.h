@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Widgets/SCompoundWidget.h"
 #include "UObject/WeakObjectPtr.h"
+#include "FaceSDFGenerator.h"
 
 class USkeletalMesh;
 struct FAssetData;
@@ -60,7 +61,8 @@ private:
     FReply OnGenerateAtlasClicked();
 
     bool GenerateSDFAtlas(
-        const TArray<FString>& SDFFiles,
+        const TArray<FFaceSDFTriangle>& FaceTriangles,
+        int32 SDFResolution,
         TArray<uint8>& OutAtlasPixels,
         int32& OutAtlasResolution);
 

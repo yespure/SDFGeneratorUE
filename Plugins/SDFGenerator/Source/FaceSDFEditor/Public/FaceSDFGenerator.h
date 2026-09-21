@@ -9,6 +9,13 @@ class FFaceSDFGenerator
 {
 public:
 
+    static bool RayIntersectsTriangle(
+        const FVector3f& RayOrigin,
+        const FVector3f& RayDirection,
+        const FFaceSDFTriangle& Triangle);
+    
+
+
     //获取模型三角面数量
     static bool ExtractFaceTriangles(
         USkeletalMesh* Mesh,
@@ -18,8 +25,9 @@ public:
         TArray<FFaceSDFTriangle>& OutTriangles);
 
     //模型光栅化
-    static bool RasterizeFaceMask(
+    static bool RasterizeShadowMask(
         const TArray<FFaceSDFTriangle>& Triangles,
+        const FVector3f& LightDirection,
         int32 Resolution,
         TArray<uint8>& OutPixels);
 

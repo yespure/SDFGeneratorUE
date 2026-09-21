@@ -30,11 +30,15 @@ bool FFaceSDFTexture::SaveFaceMaskTexture(
         SafeAssetName = TEXT("FaceMask");
     }
 
-    FString PackagePath =
-        FString::Printf(TEXT("/Game/FaceSDF/%s"), *SafeAssetName);//设置资源包路径
+    // 所有Shadow Mask都保存在同一个文件夹中
+    const FString FolderPath =
+        TEXT("/Game/FaceSDF/ShadowMasks");
 
-    FString PackageName =
-        PackagePath + TEXT("/") + SafeAssetName;
+    // PackageName同时表示资源保存路径和资源名称
+    const FString PackageName =
+        FolderPath +
+        TEXT("/") +
+        SafeAssetName;
 
     UPackage* Package =
         CreatePackage(*PackageName);//创建资源包

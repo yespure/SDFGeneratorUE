@@ -32,6 +32,57 @@
 
 #define LOCTEXT_NAMESPACE "SFaceSDFGeneratorWindow"
 
+static FVector3f MakeFaceSDFLightDirection(
+    float YawDegrees,
+    float PitchDegrees)
+{
+    const float YawRadians =
+        FMath::DegreesToRadians(
+            YawDegrees);
+
+    const float PitchRadians =
+        FMath::DegreesToRadians(
+            PitchDegrees);
+
+    const float CosPitch =
+        FMath::Cos(PitchRadians);
+
+    // 模型脸部正前方为+Y
+    const FVector3f Forward(
+        0.0f,
+        1.0f,
+        0.0f);
+
+    // 模型脸部右侧为-X
+    const FVector3f Right(
+        -1.0f,
+        0.0f,
+        0.0f);
+
+    // 模型头顶方向为+Z
+    const FVector3f Up(
+        0.0f,
+        0.0f,
+        1.0f);
+
+    const FVector3f Direction =
+        Forward *
+        (
+            CosPitch *
+            FMath::Cos(YawRadians)
+            )
+        +
+        Right *
+        (
+            CosPitch *
+            FMath::Sin(YawRadians)
+            )
+        +
+        Up *
+        FMath::Sin(PitchRadians);
+
+    return Direction.GetSafeNormal();
+}
 
 void SFaceSDFGeneratorWindow::Construct(const FArguments& InArgs)
 {
@@ -264,11 +315,13 @@ void SFaceSDFGeneratorWindow::Construct(const FArguments& InArgs)
                 .HAlign(HAlign_Center)
                 [
                     SNew(SButton)
-                        .Text(LOCTEXT("GenerateBtn", "Generate SDF"))
+                        .Text(LOCTEXT(
+                            "GenerateAtlasBtn",
+                            "Generate SDF Atlas From Mesh"))
                         .OnClicked(
                             FOnClicked::CreateSP(
                                 this,
-                                &SFaceSDFGeneratorWindow::OnGenerateClicked))
+                                &SFaceSDFGeneratorWindow::OnGenerateAtlasClicked))
                 ]
         ];
 }
@@ -276,14 +329,7 @@ void SFaceSDFGeneratorWindow::Construct(const FArguments& InArgs)
 
 FReply SFaceSDFGeneratorWindow::OnGenerateClicked()
 {
-    UE_LOG(LogTemp, Warning,
-        TEXT("Face SDF: Generate Clicked. Mesh: %s, LOD: %d, Section: %d, UV: %d, Res: %d"),
-        *GetSelectedMeshAsset(),
-        LODIndex,
-        SectionIndex,
-        UVChannel,
-        Resolution);
-
+    // 获取选中模型的面部三角形
     TArray<FFaceSDFTriangle> FaceTriangles;
 
     if (!FFaceSDFGenerator::ExtractFaceTriangles(
@@ -293,111 +339,241 @@ FReply SFaceSDFGeneratorWindow::OnGenerateClicked()
         UVChannel,
         FaceTriangles))
     {
-        UE_LOG(LogTemp, Warning,
+        UE_LOG(
+            LogTemp,
+            Error,
             TEXT("Face SDF: Failed to extract face triangles."));
 
         return FReply::Handled();
     }
 
-    TArray<uint8> FaceMaskPixels;
+    TArray<FVector3f> LightDirections;
+    TArray<FString> OutputNames;
 
-    if (!FFaceSDFGenerator::RasterizeFaceMask(
-        FaceTriangles,
-        Resolution,
-        FaceMaskPixels))
+    // 第一张：正上方光源
+    LightDirections.Add(
+        FVector3f(0.0f, 0.0f, 1.0f));
+
+    OutputNames.Add(
+        TEXT("FaceShadow_01_01"));
+
+    // 中间7行的俯仰角
+    const float PitchAngles[] =
     {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to rasterize face mask."));
+        67.5f,
+        45.0f,
+        22.5f,
+        0.0f,
+        -22.5f,
+        -45.0f,
+        -67.5f
+    };
+
+    // 每行从左到右的9个水平角
+    const float YawAngles[] =
+    {
+        -90.0f,
+        -67.5f,
+        -45.0f,
+        -22.5f,
+        0.0f,
+        22.5f,
+        45.0f,
+        67.5f,
+        90.0f
+    };
+
+    // 生成中间7行，每行9个方向
+    for (int32 PitchIndex = 0;
+        PitchIndex < 7;
+        ++PitchIndex)
+    {
+        // Atlas中的实际行号为2～8
+        const int32 Row =
+            PitchIndex + 2;
+
+        for (int32 YawIndex = 0;
+            YawIndex < 9;
+            ++YawIndex)
+        {
+            // Atlas中的实际列号为1～9
+            const int32 Column =
+                YawIndex + 1;
+
+            LightDirections.Add(
+                MakeFaceSDFLightDirection(
+                    YawAngles[YawIndex],
+                    PitchAngles[PitchIndex]));
+
+            OutputNames.Add(
+                FString::Printf(
+                    TEXT("FaceShadow_%02d_%02d"),
+                    Row,
+                    Column));
+        }
+    }
+
+    // 最后一张：正下方光源
+    LightDirections.Add(
+        FVector3f(0.0f, 0.0f, -1.0f));
+
+    OutputNames.Add(
+        TEXT("FaceShadow_09_01"));
+
+    if (LightDirections.Num() != 65 ||
+        OutputNames.Num() != 65)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("Face SDF: Invalid light direction count."));
 
         return FReply::Handled();
     }
 
-    TArray<uint8> SDFPixels;
+    int32 GeneratedCount = 0;
 
-    if (!FFaceSDFGenerator::GenerateGrayscaleSDF(
-        FaceMaskPixels,
-        Resolution,
-        SDFPixels))
+    // 根据所有方向依次生成Shadow Mask
+    for (int32 LightIndex = 0;
+        LightIndex < LightDirections.Num();
+        ++LightIndex)
     {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to generate grayscale SDF."));
+        TArray<uint8> ShadowMaskPixels;
 
-        return FReply::Handled();
+        if (!FFaceSDFGenerator::RasterizeShadowMask(
+            FaceTriangles,
+            LightDirections[LightIndex],
+            Resolution,
+            ShadowMaskPixels))
+        {
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("Face SDF: Failed to generate Shadow Mask %d."),
+                LightIndex);
+
+            continue;
+        }
+
+        if (!FFaceSDFTexture::SaveFaceMaskTexture(
+            ShadowMaskPixels,
+            Resolution,
+            OutputNames[LightIndex]))
+        {
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("Face SDF: Failed to save %s."),
+                *OutputNames[LightIndex]);
+
+            continue;
+        }
+
+        ++GeneratedCount;
+
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("Face SDF: Generated %s, Direction=(%f, %f, %f)"),
+            *OutputNames[LightIndex],
+            LightDirections[LightIndex].X,
+            LightDirections[LightIndex].Y,
+            LightDirections[LightIndex].Z);
     }
 
-    const FString SDFAssetName =
-        OutputName.IsEmpty()
-        ? TEXT("FaceSDF")
-        : OutputName;
-
-    if (!FFaceSDFTexture::SaveFaceSDFTexture(
-        SDFPixels,
-        Resolution,
-        SDFAssetName))
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to save grayscale SDF texture."));
-
-        return FReply::Handled();
-    }
-
-    UE_LOG(LogTemp, Warning,
-        TEXT("Face SDF: Generation completed successfully."));
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("Face SDF: Lighting generation completed. %d / %d generated."),
+        GeneratedCount,
+        LightDirections.Num());
 
     return FReply::Handled();
 }
 
 FReply SFaceSDFGeneratorWindow::OnGenerateAtlasClicked()
 {
-    if (SelectedShadowMaskFiles.Num() != 65)
+    if (!SelectedMesh.IsValid())
     {
         UE_LOG(
             LogTemp,
             Warning,
-            TEXT("Face SDF: Please select exactly 65 files for the 9x9 Atlas."));
+            TEXT("Face SDF: Please select a Skeletal Mesh."));
 
         return FReply::Handled();
     }
 
-    TArray<FString> SDFFiles;
+    if (Resolution <= 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("Face SDF: Invalid resolution."));
 
-    /*
-     * 这里暂时直接使用已经选择的文件。
-     *
-     * 如果你现在SelectedShadowMaskFiles保存的是
-     * Shadow Mask PNG，那么这里需要先生成SDF，
-     * 再把生成的SDF像素直接放入Atlas。
-     *
-     * 第一版为了跑通流程，我们先把当前选中的
-     * 65张SDF PNG作为输入。
-     */
+        return FReply::Handled();
+    }
 
-    SDFFiles = SelectedShadowMaskFiles;
+    // 只需要从模型提取一次三角形
+    TArray<FFaceSDFTriangle> FaceTriangles;
+
+    if (!FFaceSDFGenerator::ExtractFaceTriangles(
+        SelectedMesh.Get(),
+        LODIndex,
+        SectionIndex,
+        UVChannel,
+        FaceTriangles))
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("Face SDF: Failed to extract face triangles."));
+
+        return FReply::Handled();
+    }
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT(
+            "Face SDF: Starting direct Atlas generation. "
+            "Triangles=%d Resolution=%d."),
+        FaceTriangles.Num(),
+        Resolution);
 
     TArray<uint8> AtlasPixels;
     int32 AtlasResolution = 0;
 
+    // 直接通过模型生成65个方向的SDF Atlas
     if (!GenerateSDFAtlas(
-        SDFFiles,
+        FaceTriangles,
+        Resolution,
         AtlasPixels,
         AtlasResolution))
     {
         UE_LOG(
             LogTemp,
-            Warning,
+            Error,
             TEXT("Face SDF: Failed to generate SDF Atlas."));
 
         return FReply::Handled();
     }
 
+    FString AtlasAssetName = OutputName;
+
+    if (AtlasAssetName.IsEmpty())
+    {
+        AtlasAssetName =
+            TEXT("FaceSDF_Atlas");
+    }
+
     if (!SaveSDFAtlasTexture(
         AtlasPixels,
         AtlasResolution,
-        TEXT("FaceSDF_Atlas")))
+        AtlasAssetName))
     {
         UE_LOG(
             LogTemp,
-            Warning,
+            Error,
             TEXT("Face SDF: Failed to save SDF Atlas."));
 
         return FReply::Handled();
@@ -406,7 +582,11 @@ FReply SFaceSDFGeneratorWindow::OnGenerateAtlasClicked()
     UE_LOG(
         LogTemp,
         Warning,
-        TEXT("Face SDF: Atlas generation completed successfully."));
+        TEXT(
+            "Face SDF: Atlas generation completed successfully. "
+            "Asset=%s Resolution=%d."),
+        *AtlasAssetName,
+        AtlasResolution);
 
     return FReply::Handled();
 }
@@ -881,169 +1061,321 @@ bool SFaceSDFGeneratorWindow::LoadPNGAsGrayscale(
 }
 
 bool SFaceSDFGeneratorWindow::GenerateSDFAtlas(
-    const TArray<FString>& SDFFiles,
+    const TArray<FFaceSDFTriangle>& FaceTriangles,
+    int32 SDFResolution,
     TArray<uint8>& OutAtlasPixels,
     int32& OutAtlasResolution)
 {
-    if (SDFFiles.Num() != 65)
+    if (FaceTriangles.Num() == 0)
     {
         UE_LOG(
             LogTemp,
             Warning,
-            TEXT("Face SDF: 9x9 Atlas requires 65 SDF files. Current=%d"),
-            SDFFiles.Num());
+            TEXT("Face SDF: No face triangles for Atlas generation."));
 
         return false;
     }
 
-    TArray<uint8> FirstPixels;//用于确定单张SDF分辨率
-    int32 SDFWidth = 0;
-    int32 SDFHeight = 0;
-
-    if (!LoadPNGAsGrayscale(
-        SDFFiles[0],
-        FirstPixels,
-        SDFWidth,
-        SDFHeight))
-    {
-        return false;
-    }
-
-    if (SDFWidth != SDFHeight)
+    if (SDFResolution <= 0)
     {
         UE_LOG(
             LogTemp,
             Warning,
-            TEXT("Face SDF: SDF texture must be square."));
+            TEXT("Face SDF: Invalid SDF resolution."));
 
         return false;
-    }//保护
+    }
 
-    const int32 AtlasGridSize = 9;//后续可更改,现在必须是65张
+    const int32 AtlasGridSize = 9;
 
     OutAtlasResolution =
-        SDFWidth * AtlasGridSize;//计算Grid大小
+        SDFResolution * AtlasGridSize;
+
     const int32 AtlasPixelCount =
-        OutAtlasResolution * OutAtlasResolution;
+        OutAtlasResolution *
+        OutAtlasResolution;
 
+    // SDF中128表示距离边界为0，因此空白区域初始化为128
     OutAtlasPixels.Init(
-        0,
-        AtlasPixelCount);//设定Grid大小
-    //遍历每一张SDF
-    for (const FString& FilePath : SDFFiles)
-    {
-        TArray<uint8> SDFPixels;
-        int32 Width = 0;
-        int32 Height = 0;
+        128,
+        AtlasPixelCount);
 
-        if (!LoadPNGAsGrayscale(
-            FilePath,
-            SDFPixels,
-            Width,
-            Height))
+    // 将一张SDF复制到Atlas指定格子
+    auto CopySDFToAtlas =
+        [&](
+            const TArray<uint8>& SDFPixels,
+            int32 TargetRow,
+            int32 TargetColumn) -> bool
         {
-            return false;
-        }
-
-        if (Width != SDFWidth ||
-            Height != SDFHeight)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: SDF resolution mismatch: %s"),
-                *FilePath);
-
-            return false;
-        }//保护+Debug
-
-        FString FileName = FPaths::GetBaseFilename(FilePath);
-        int32 Row = -1;
-        int32 Column = -1;
-
-        TArray<FString> Parts;
-        FileName.ParseIntoArray(
-            Parts,
-            TEXT("_"),
-            true);//FileName严格要求
-
-        if (Parts.Num() < 2)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Invalid SDF filename: %s"),
-                *FileName);
-
-            return false;
-        }
-
-        Row = FCString::Atoi(
-            *Parts[Parts.Num() - 2]);
-        Column = FCString::Atoi(
-            *Parts[Parts.Num() - 1]);
-
-        Row -= 1;
-        Column -= 1;
-
-        // 检查Atlas坐标
-        if (Row < 0 || Row >= 9 ||
-            Column < 0 || Column >= 9)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Invalid Atlas coordinate: %s"),
-                *FileName);
-
-            return false;
-        }
-
-        // 顶部和底部极点只能存在于第一列
-        if ((Row == 0 || Row == 8) &&
-            Column != 0)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Invalid pole position: %s"),
-                *FileName);
-
-            return false;
-        }
-
-        // 将SDF复制到Atlas
-        for (int32 Y = 0; Y < SDFHeight; ++Y)
-        {
-            for (int32 X = 0; X < SDFWidth; ++X)
+            if (SDFPixels.Num() !=
+                SDFResolution * SDFResolution)
             {
-                const int32 AtlasX =
-                    Column * SDFWidth + X;
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("Face SDF: Invalid SDF pixel count."));
 
-                const int32 AtlasY =
-                    Row * SDFHeight + Y;
+                return false;
+            }
 
-                const int32 AtlasIndex =
-                    AtlasY * OutAtlasResolution +
-                    AtlasX;
+            if (TargetRow < 0 ||
+                TargetRow >= AtlasGridSize ||
+                TargetColumn < 0 ||
+                TargetColumn >= AtlasGridSize)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("Face SDF: Invalid Atlas position Row=%d Column=%d."),
+                    TargetRow,
+                    TargetColumn);
 
-                const int32 SDFIndex =
-                    Y * SDFWidth + X;
+                return false;
+            }
 
-                OutAtlasPixels[AtlasIndex] =
-                    SDFPixels[SDFIndex];
+            for (int32 Y = 0;
+                Y < SDFResolution;
+                ++Y)
+            {
+                for (int32 X = 0;
+                    X < SDFResolution;
+                    ++X)
+                {
+                    const int32 SourceIndex =
+                        Y * SDFResolution + X;
+
+                    const int32 AtlasX =
+                        TargetColumn * SDFResolution + X;
+
+                    const int32 AtlasY =
+                        TargetRow * SDFResolution + Y;
+
+                    const int32 AtlasIndex =
+                        AtlasY * OutAtlasResolution +
+                        AtlasX;
+
+                    OutAtlasPixels[AtlasIndex] =
+                        SDFPixels[SourceIndex];
+                }
+            }
+
+            return true;
+        };
+
+    // 生成单个方向的Shadow Mask和SDF
+    auto GenerateOneSDF =
+        [&](
+            const FVector3f& LightDirection,
+            TArray<uint8>& OutSDFPixels) -> bool
+        {
+            TArray<uint8> ShadowMaskPixels;
+
+            if (!FFaceSDFGenerator::RasterizeShadowMask(
+                FaceTriangles,
+                LightDirection,
+                SDFResolution,
+                ShadowMaskPixels))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("Face SDF: Failed to generate Shadow Mask."));
+
+                return false;
+            }
+
+            if (!FFaceSDFGenerator::GenerateGrayscaleSDF(
+                ShadowMaskPixels,
+                SDFResolution,
+                OutSDFPixels))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("Face SDF: Failed to generate grayscale SDF."));
+
+                return false;
+            }
+
+            return true;
+        };
+
+    int32 GeneratedDirectionCount = 0;
+
+    // 第一行：正上方光源
+    {
+        TArray<uint8> TopSDFPixels;
+
+        const FVector3f TopLightDirection(
+            0.0f,
+            0.0f,
+            -1.0f);
+
+        if (!GenerateOneSDF(
+            TopLightDirection,
+            TopSDFPixels))
+        {
+            return false;
+        }
+
+        // 极点水平方向没有区别，因此复制到第一行全部9格
+        for (int32 Column = 0;
+            Column < AtlasGridSize;
+            ++Column)
+        {
+            if (!CopySDFToAtlas(
+                TopSDFPixels,
+                0,
+                Column))
+            {
+                return false;
             }
         }
+
+        ++GeneratedDirectionCount;
+    }
+
+    // 中间7行的俯仰角
+    const float PitchAngles[] =
+    {
+        -67.5f,
+        -45.0f,
+        -22.5f,
+        0.0f,
+        22.5f,
+        45.0f,
+        67.5f
+    };
+
+    // 每行从左到右的9个水平角
+    // 水平方向完整旋转360度
+// 360 / 9 = 40度
+    const float YawAngles[] =
+    {
+        0.0f,
+    22.5f,
+    45.0f,
+    67.5f,
+    90.0f,
+    112.5f,
+    135.0f,
+    157.5f,
+    180.0f
+    };
+
+    // 第二行到第八行，每行生成9个方向
+    for (int32 PitchIndex = 0;
+        PitchIndex < 7;
+        ++PitchIndex)
+    {
+        const int32 AtlasRow =
+            PitchIndex + 1;
+
+        for (int32 YawIndex = 0;
+            YawIndex < 9;
+            ++YawIndex)
+        {
+            const int32 AtlasColumn =
+                YawIndex;
+
+            const FVector3f LightDirection =
+                MakeFaceSDFLightDirection(
+                    YawAngles[YawIndex],
+                    PitchAngles[PitchIndex]);
+
+            TArray<uint8> SDFPixels;
+
+            if (!GenerateOneSDF(
+                LightDirection,
+                SDFPixels))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT(
+                        "Face SDF: Failed at Row=%d Column=%d."),
+                    AtlasRow,
+                    AtlasColumn);
+
+                return false;
+            }
+
+            if (!CopySDFToAtlas(
+                SDFPixels,
+                AtlasRow,
+                AtlasColumn))
+            {
+                return false;
+            }
+
+            ++GeneratedDirectionCount;
+
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT(
+                    "Face SDF: Generated direction %d / 65, Row=%d Column=%d."),
+                GeneratedDirectionCount,
+                AtlasRow,
+                AtlasColumn);
+        }
+    }
+
+    // 最后一行：正下方光源
+    {
+        TArray<uint8> BottomSDFPixels;
+
+        const FVector3f BottomLightDirection(
+            0.0f,
+            0.0f,
+            1.0f);
+
+        if (!GenerateOneSDF(
+            BottomLightDirection,
+            BottomSDFPixels))
+        {
+            return false;
+        }
+
+        // 极点水平方向没有区别，因此复制到最后一行全部9格
+        for (int32 Column = 0;
+            Column < AtlasGridSize;
+            ++Column)
+        {
+            if (!CopySDFToAtlas(
+                BottomSDFPixels,
+                8,
+                Column))
+            {
+                return false;
+            }
+        }
+
+        ++GeneratedDirectionCount;
+    }
+
+    if (GeneratedDirectionCount != 65)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT(
+                "Face SDF: Invalid generated direction count: %d."),
+            GeneratedDirectionCount);
+
+        return false;
     }
 
     UE_LOG(
         LogTemp,
         Warning,
-        TEXT("Face SDF: 9x9 SDF Atlas generated. Resolution=%d"),
+        TEXT(
+            "Face SDF: Atlas generated directly from mesh. "
+            "Directions=%d, AtlasResolution=%d."),
+        GeneratedDirectionCount,
         OutAtlasResolution);
 
     return true;
-    
 }
 
 //保存Atlas
