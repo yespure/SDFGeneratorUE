@@ -10,7 +10,7 @@
 
 
 //Mask保存逻辑
-bool FFaceSDFTexture::SaveFaceMaskTexture(
+bool FFaceSDFTexture::SaveGrayscaleTexture(
     const TArray<uint8>& Pixels,
     int32 Resolution,
     const FString& AssetName)
@@ -128,112 +128,6 @@ bool FFaceSDFTexture::SaveFaceMaskTexture(
 
     UE_LOG(LogTemp, Warning,
         TEXT("Face SDF: Texture saved: %s"),
-        *PackageName);
-
-    return true;
-}
-
-
-//灰度图保存函数与上方保存函数同理,使用Chatgpt生成实现
-bool FFaceSDFTexture::SaveFaceSDFTexture(
-    const TArray<uint8>& Pixels,
-    int32 Resolution,
-    const FString& AssetName)
-{
-    if (Pixels.Num() != Resolution * Resolution)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Invalid SDF pixel data."));
-        return false;
-    }
-
-    const FString FolderPath = TEXT("/Game/FaceSDF");
-
-    const FString PackageName =
-        FolderPath + TEXT("/") + AssetName;
-
-    UPackage* Package =
-        CreatePackage(*PackageName);
-
-    if (!Package)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to create package."));
-        return false;
-    }
-
-    UTexture2D* Texture =
-        NewObject<UTexture2D>(
-            Package,
-            *AssetName,
-            RF_Public | RF_Standalone);
-
-    if (!Texture)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to create texture."));
-        return false;
-    }
-
-    Texture->Source.Init(
-        Resolution,
-        Resolution,
-        1,
-        1,
-        TSF_G8);
-
-    uint8* MipData =
-        Texture->Source.LockMip(0);
-
-    if (!MipData)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to lock texture data."));
-        return false;
-    }
-
-    FMemory::Memcpy(
-        MipData,
-        Pixels.GetData(),
-        Pixels.Num());
-
-    Texture->Source.UnlockMip(0);
-
-    Texture->SRGB = false;
-    Texture->CompressionSettings = TC_Grayscale;
-    Texture->MipGenSettings = TMGS_NoMipmaps;
-    Texture->Filter = TF_Bilinear;
-
-    Texture->UpdateResource();
-
-    FAssetRegistryModule::AssetCreated(Texture);
-
-    Package->MarkPackageDirty();
-
-    const FString PackageFileName =
-        FPackageName::LongPackageNameToFilename(
-            PackageName,
-            FPackageName::GetAssetPackageExtension());
-
-    FSavePackageArgs SaveArgs;
-    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-
-    const bool bSaved =
-        UPackage::SavePackage(
-            Package,
-            Texture,
-            *PackageFileName,
-            SaveArgs);
-
-    if (!bSaved)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to save texture."));
-        return false;
-    }
-
-    UE_LOG(LogTemp, Warning,
-        TEXT("Face SDF: Grayscale SDF saved: %s"),
         *PackageName);
 
     return true;

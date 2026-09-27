@@ -1,1490 +1,1890 @@
 ﻿#include "SFaceSDFGeneratorWindow.h"
 
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SNumericEntryBox.h"
-#include "Widgets/Input/SEditableTextBox.h"
-#include "Widgets/Input/SComboBox.h"
+#include "FaceSDFImageIO.h"
+#include "FaceSDFLightSampler.h"
+#include "FaceSDFTexture.h"
+#include "SFaceSDFPainter.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "DesktopPlatformModule.h"
+#include "Engine/SkeletalMesh.h"
+#include "Framework/Application/SlateApplication.h"
+#include "HAL/FileManager.h"
+#include "IDesktopPlatform.h"
+#include "Misc/Paths.h"
 #include "PropertyCustomizationHelpers.h"
 
-#include "Engine/SkeletalMesh.h"
-
-#include "FaceSDFGenerator.h"
-#include "FaceSDFTexture.h"
-
-#include "Framework/Application/SlateApplication.h"
-
-#include "DesktopPlatformModule.h"
-#include "IDesktopPlatform.h"
-
-#include "IImageWrapper.h"
-#include "IImageWrapperModule.h"
-
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
-
-#include "AssetRegistry/AssetRegistryModule.h"
-#include "Modules/ModuleManager.h"
-#include "ObjectTools.h"
-#include "UObject/Package.h"
-#include "UObject/SavePackage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SFaceSDFGeneratorWindow"
 
-static FVector3f MakeFaceSDFLightDirection(
-    float YawDegrees,
-    float PitchDegrees)
+namespace FaceSDFWindowConstants
 {
-    const float YawRadians =
-        FMath::DegreesToRadians(
-            YawDegrees);
+    static constexpr int32 AtlasGridSize = 9;
 
-    const float PitchRadians =
-        FMath::DegreesToRadians(
-            PitchDegrees);
+    static constexpr int32 ExpectedSampleCount = 65;
 
-    const float CosPitch =
-        FMath::Cos(PitchRadians);
+    static constexpr int32 MinimumResolution = 16;
 
-    // 模型脸部正前方为+Y
-    const FVector3f Forward(
-        0.0f,
-        1.0f,
-        0.0f);
+    static constexpr int32 MaximumResolution = 512;
 
-    // 模型脸部右侧为-X
-    const FVector3f Right(
-        -1.0f,
-        0.0f,
-        0.0f);
-
-    // 模型头顶方向为+Z
-    const FVector3f Up(
-        0.0f,
-        0.0f,
-        1.0f);
-
-    const FVector3f Direction =
-        Forward *
-        (
-            CosPitch *
-            FMath::Cos(YawRadians)
-            )
-        +
-        Right *
-        (
-            CosPitch *
-            FMath::Sin(YawRadians)
-            )
-        +
-        Up *
-        FMath::Sin(PitchRadians);
-
-    return Direction.GetSafeNormal();
+    static constexpr float PainterPreviewSize = 512.0f;
 }
 
-void SFaceSDFGeneratorWindow::Construct(const FArguments& InArgs)
+// =============================================================================
+// 窗口构建
+// =============================================================================
+
+void SFaceSDFGeneratorWindow::Construct(
+    const FArguments& InArgs)
 {
     ChildSlot
         [
+            SNew(SScrollBox)
+
+                + SScrollBox::Slot()
+                [
+                    SNew(SVerticalBox)
+
+                        // -----------------------------------------------------------------
+                        // 标题
+                        // -----------------------------------------------------------------
+
+                        +SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(10.0f)
+                        [
+                            SNew(STextBlock)
+                                .Text(LOCTEXT(
+                                    "WindowTitle",
+                                    "Face SDF Generator"))
+                        ]
+
+                        // -----------------------------------------------------------------
+                        // 模型设置
+                        // -----------------------------------------------------------------
+
+                        +SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(8.0f)
+                        [
+                            BuildMeshSettingsPanel()
+                        ]
+
+                        // -----------------------------------------------------------------
+                        // 生成流程
+                        // -----------------------------------------------------------------
+
+                        +SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(8.0f)
+                        [
+                            BuildGenerationPanel()
+                        ]
+
+                        // -----------------------------------------------------------------
+                        // Painter
+                        // -----------------------------------------------------------------
+
+                        +SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(8.0f)
+                        [
+                            BuildPainterPanel()
+                        ]
+
+                        // -----------------------------------------------------------------
+                        // 状态
+                        // -----------------------------------------------------------------
+
+                        +SVerticalBox::Slot()
+                        .AutoHeight()
+                        .Padding(8.0f)
+                        [
+                            BuildStatusPanel()
+                        ]
+                ]
+        ];
+}
+
+// =============================================================================
+// 模型设置UI
+// =============================================================================
+
+TSharedRef<SWidget>
+SFaceSDFGeneratorWindow::BuildMeshSettingsPanel()
+{
+    return
+        SNew(SBorder)
+        .Padding(8.0f)
+        [
             SNew(SVerticalBox)
 
-                // 标题
                 + SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(10.0f)
+                .Padding(2.0f)
                 [
                     SNew(STextBlock)
-                        .Text(LOCTEXT("WindowTitle", "Face SDF Generator V1"))
+                        .Text(LOCTEXT(
+                            "MeshSettingsTitle",
+                            "Mesh Settings"))
                 ]
 
-                //Mesh部分
-                + SVerticalBox::Slot()
+                // -----------------------------------------------------------------
+                // Skeletal Mesh
+                // -----------------------------------------------------------------
+
+                +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
                 [
                     SNew(SHorizontalBox)
 
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
-                        .Padding(0, 0, 10, 0)
+                        .Padding(0.0f, 0.0f, 8.0f, 0.0f)
                         [
                             SNew(STextBlock)
-                                .Text(LOCTEXT("SelectMeshLabel", "Select Mesh:"))
+                                .Text(LOCTEXT(
+                                    "SelectMeshLabel",
+                                    "Skeletal Mesh"))
                         ]
 
                         + SHorizontalBox::Slot()
                         .FillWidth(1.0f)
                         [
                             SNew(SObjectPropertyEntryBox)
-                                .AllowedClass(USkeletalMesh::StaticClass())
-                                // skeletal mesh only
-                                .ObjectPath(this, &SFaceSDFGeneratorWindow::GetSelectedMeshAsset)
-                                // 获取当前选中的资源
-                                .OnObjectChanged(this, &SFaceSDFGeneratorWindow::OnMeshChanged)
-                                // 改变时的回调
+                                .AllowedClass(
+                                    USkeletalMesh::StaticClass())
+                                .ObjectPath(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    GetSelectedMeshAsset)
+                                .OnObjectChanged(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnMeshChanged)
                         ]
                 ]
 
-            //LOD部分
-            + SVerticalBox::Slot()
+            // -----------------------------------------------------------------
+            // LOD
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
                 [
                     SNew(SHorizontalBox)
 
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
-                        .Padding(0, 0, 10, 0)
+                        .Padding(0.0f, 0.0f, 8.0f, 0.0f)
                         [
-                            // ✅修复：LOCTEXT
-                            SNew(STextBlock).Text(LOCTEXT("LODLabel", "LOD:"))
+                            SNew(STextBlock)
+                                .Text(LOCTEXT(
+                                    "LODLabel",
+                                    "LOD"))
                         ]
 
                         + SHorizontalBox::Slot()
                         .FillWidth(1.0f)
                         [
                             SNew(SNumericEntryBox<int32>)
-                                .Value(this, &SFaceSDFGeneratorWindow::GetLODValue)
-                                .OnValueChanged(this, &SFaceSDFGeneratorWindow::OnLODChanged)
+                                .Value(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    GetLODValue)
+                                .OnValueChanged(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnLODChanged)
                                 .MinValue(0)
+                                .MinSliderValue(0)
                         ]
                 ]
 
-            //Section部分
-            + SVerticalBox::Slot()
+            // -----------------------------------------------------------------
+            // Section
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
                 [
                     SNew(SHorizontalBox)
 
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
-                        .Padding(0, 0, 10, 0)
+                        .Padding(0.0f, 0.0f, 8.0f, 0.0f)
                         [
-                            SNew(STextBlock).Text(LOCTEXT("SectionLabel", "Section:"))
+                            SNew(STextBlock)
+                                .Text(LOCTEXT(
+                                    "SectionLabel",
+                                    "Section"))
                         ]
 
                         + SHorizontalBox::Slot()
                         .FillWidth(1.0f)
                         [
                             SNew(SNumericEntryBox<int32>)
-                                .Value(this, &SFaceSDFGeneratorWindow::GetSectionValue)
-                                .OnValueChanged(this, &SFaceSDFGeneratorWindow::OnSectionChanged)
+                                .Value(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    GetSectionValue)
+                                .OnValueChanged(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnSectionChanged)
                                 .MinValue(0)
+                                .MinSliderValue(0)
                         ]
                 ]
 
-            //UVChannel部分
-            + SVerticalBox::Slot()
+            // -----------------------------------------------------------------
+            // UV Channel
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
                 [
                     SNew(SHorizontalBox)
 
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
-                        .Padding(0, 0, 10, 0)
+                        .Padding(0.0f, 0.0f, 8.0f, 0.0f)
                         [
-                            SNew(STextBlock).Text(LOCTEXT("UVChannelLabel", "UV Channel:"))
+                            SNew(STextBlock)
+                                .Text(LOCTEXT(
+                                    "UVChannelLabel",
+                                    "UV Channel"))
                         ]
 
                         + SHorizontalBox::Slot()
                         .FillWidth(1.0f)
                         [
                             SNew(SNumericEntryBox<int32>)
-                                .Value(this, &SFaceSDFGeneratorWindow::GetUVChannelValue)
-                                .OnValueChanged(this, &SFaceSDFGeneratorWindow::OnUVChannelChanged)
+                                .Value(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    GetUVChannelValue)
+                                .OnValueChanged(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnUVChannelChanged)
                                 .MinValue(0)
+                                .MinSliderValue(0)
                         ]
                 ]
 
-            //Resolution部分
-            + SVerticalBox::Slot()
+            // -----------------------------------------------------------------
+            // Resolution
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
                 [
                     SNew(SHorizontalBox)
 
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
-                        .Padding(0, 0, 10, 0)
+                        .Padding(0.0f, 0.0f, 8.0f, 0.0f)
                         [
-                            SNew(STextBlock).Text(LOCTEXT("ResolutionLabel", "Resolution:"))
+                            SNew(STextBlock)
+                                .Text(LOCTEXT(
+                                    "ResolutionLabel",
+                                    "Resolution"))
                         ]
 
                         + SHorizontalBox::Slot()
                         .FillWidth(1.0f)
                         [
                             SNew(SNumericEntryBox<int32>)
-                                .Value(this, &SFaceSDFGeneratorWindow::GetResolutionValue)
-                                .OnValueChanged(this, &SFaceSDFGeneratorWindow::OnResolutionChanged)
-                                .MinValue(64)
+                                .Value(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    GetResolutionValue)
+                                .OnValueChanged(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnResolutionChanged)
+                                .MinValue(
+                                    FaceSDFWindowConstants::
+                                    MinimumResolution)
+                                .MaxValue(
+                                    FaceSDFWindowConstants::
+                                    MaximumResolution)
+                                .MinSliderValue(
+                                    FaceSDFWindowConstants::
+                                    MinimumResolution)
+                                .MaxSliderValue(
+                                    FaceSDFWindowConstants::
+                                    MaximumResolution)
                         ]
                 ]
 
-            //OutputName部分
-            + SVerticalBox::Slot()
+            // -----------------------------------------------------------------
+            // Output Name
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
                 [
                     SNew(SHorizontalBox)
 
                         + SHorizontalBox::Slot()
                         .AutoWidth()
                         .VAlign(VAlign_Center)
-                        .Padding(0, 0, 10, 0)
+                        .Padding(0.0f, 0.0f, 8.0f, 0.0f)
                         [
-                            SNew(STextBlock).Text(LOCTEXT("OutputNameLabel", "Output Name:"))
+                            SNew(STextBlock)
+                                .Text(LOCTEXT(
+                                    "OutputNameLabel",
+                                    "Output Name"))
                         ]
 
                         + SHorizontalBox::Slot()
                         .FillWidth(1.0f)
                         [
                             SNew(SEditableTextBox)
-                                .Text(this, &SFaceSDFGeneratorWindow::GetOutputNameText)
-                                .OnTextChanged(this, &SFaceSDFGeneratorWindow::OnOutputNameChanged)
+                                .Text(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    GetOutputNameText)
+                                .OnTextChanged(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnOutputNameChanged)
                         ]
                 ]
+        ];
+}
 
-            // ===== Shadow Mask 批量导入 =====
+// =============================================================================
+// 生成流程UI
+// =============================================================================
+
+TSharedRef<SWidget>
+SFaceSDFGeneratorWindow::BuildGenerationPanel()
+{
+    return
+        SNew(SBorder)
+        .Padding(8.0f)
+        [
+            SNew(SVerticalBox)
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(STextBlock)
+                        .Text(LOCTEXT(
+                            "GenerationTitle",
+                            "SDF Generation"))
+                ]
+
+                // -----------------------------------------------------------------
+                // 生成Shadow Mask
+                // -----------------------------------------------------------------
+
+                +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(SButton)
+                        .Text(LOCTEXT(
+                            "GenerateShadowMasksButton",
+                            "Generate Shadow Mask PNGs"))
+                        .ToolTipText(LOCTEXT(
+                            "GenerateShadowMasksTooltip",
+                            "Generate 65 Shadow Mask PNGs from the selected mesh."))
+                        .OnClicked(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            OnGenerateShadowMasksClicked)
+                ]
+
+            // -----------------------------------------------------------------
+            // 选择Shadow Mask
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(SButton)
+                        .Text(LOCTEXT(
+                            "SelectShadowMasksButton",
+                            "Select Shadow Mask PNGs"))
+                        .OnClicked(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            OnSelectShadowMasksClicked)
+                ]
+
             + SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
+                [
+                    SNew(STextBlock)
+                        .Text(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            GetShadowMaskStatusText)
+                ]
+
+            // -----------------------------------------------------------------
+            // Mask转SDF
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(SButton)
+                        .Text(LOCTEXT(
+                            "ConvertMasksButton",
+                            "Convert Shadow Masks to Grayscale SDF PNGs"))
+                        .OnClicked(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            OnConvertMasksToSDFClicked)
+                ]
+
+            // -----------------------------------------------------------------
+            // 选择SDF
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(SButton)
+                        .Text(LOCTEXT(
+                            "SelectSDFsButton",
+                            "Select Grayscale SDF PNGs"))
+                        .OnClicked(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            OnSelectGrayscaleSDFsClicked)
+                ]
+
+            + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(STextBlock)
+                        .Text(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            GetGrayscaleSDFStatusText)
+                ]
+
+            // -----------------------------------------------------------------
+            // 从选中的SDF生成Atlas
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(SButton)
+                        .Text(LOCTEXT(
+                            "GenerateAtlasButton",
+                            "Generate Atlas from Selected SDF PNGs"))
+                        .OnClicked(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            OnGenerateAtlasClicked)
+                ]
+
+            // -----------------------------------------------------------------
+            // 一步生成
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(SButton)
+                        .Text(LOCTEXT(
+                            "GenerateDirectAtlasButton",
+                            "Generate Atlas Directly from Mesh"))
+                        .ToolTipText(LOCTEXT(
+                            "GenerateDirectAtlasTooltip",
+                            "Generate Shadow Masks, SDF images and Atlas in one operation."))
+                        .OnClicked(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            OnGenerateAtlasFromMeshClicked)
+                ]
+        ];
+}
+
+// =============================================================================
+// Painter UI
+// =============================================================================
+
+TSharedRef<SWidget>
+SFaceSDFGeneratorWindow::BuildPainterPanel()
+{
+    return
+        SNew(SBorder)
+        .Padding(8.0f)
+        [
+            SNew(SVerticalBox)
+
+                + SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(STextBlock)
+                        .Text(LOCTEXT(
+                            "PainterTitle",
+                            "Black and White Painter"))
+                ]
+
+                // -----------------------------------------------------------------
+                // 导入和保存
+                // -----------------------------------------------------------------
+
+                +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
                 [
                     SNew(SHorizontalBox)
 
                         + SHorizontalBox::Slot()
                         .AutoWidth()
-                        .Padding(0, 0, 10, 0)
+                        .Padding(2.0f)
                         [
                             SNew(SButton)
-                                .Text(LOCTEXT("SelectShadowMasksBtn", "Select Shadow Mask PNGs"))
+                                .Text(LOCTEXT(
+                                    "ImportPainterImageButton",
+                                    "Import PNG"))
                                 .OnClicked(
-                                    FOnClicked::CreateSP(
-                                        this,
-                                        &SFaceSDFGeneratorWindow::OnSelectShadowMasksClicked))
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnImportPainterImageClicked)
                         ]
 
                     + SHorizontalBox::Slot()
-                        .FillWidth(1.0f)
-                        .VAlign(VAlign_Center)
+                        .AutoWidth()
+                        .Padding(2.0f)
                         [
-                            SNew(STextBlock)
-                                .Text(
+                            SNew(SButton)
+                                .Text(LOCTEXT(
+                                    "SavePainterImageButton",
+                                    "Save PNG"))
+                                .OnClicked(
                                     this,
-                                    &SFaceSDFGeneratorWindow::GetShadowMaskStatusText)
+                                    &SFaceSDFGeneratorWindow::
+                                    OnSavePainterImageClicked)
                         ]
                 ]
 
-            // ===== 批量生成SDF =====
-            + SVerticalBox::Slot()
+            // -----------------------------------------------------------------
+            // 黑白笔刷
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(8.0f)
+                .Padding(2.0f)
                 [
-                    SNew(SButton)
-                        .Text(LOCTEXT("GenerateAllSDFBtn", "Generate All SDF"))
-                        .OnClicked(
-                            FOnClicked::CreateSP(
-                                this,
-                                &SFaceSDFGeneratorWindow::OnGenerateAllSDFClicked))
+                    SNew(SHorizontalBox)
+
+                        + SHorizontalBox::Slot()
+                        .AutoWidth()
+                        .Padding(2.0f)
+                        [
+                            SNew(SButton)
+                                .Text(LOCTEXT(
+                                    "BlackBrushButton",
+                                    "Black Brush"))
+                                .OnClicked(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnSetBlackBrushClicked)
+                        ]
+
+                    + SHorizontalBox::Slot()
+                        .AutoWidth()
+                        .Padding(2.0f)
+                        [
+                            SNew(SButton)
+                                .Text(LOCTEXT(
+                                    "WhiteBrushButton",
+                                    "White Brush"))
+                                .OnClicked(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnSetWhiteBrushClicked)
+                        ]
+
+                    + SHorizontalBox::Slot()
+                        .AutoWidth()
+                        .VAlign(VAlign_Center)
+                        .Padding(8.0f, 0.0f)
+                        [
+                            SNew(STextBlock)
+                                .Text(LOCTEXT(
+                                    "BrushRadiusLabel",
+                                    "Brush Radius"))
+                        ]
+
+                        + SHorizontalBox::Slot()
+                        .FillWidth(1.0f)
+                        .Padding(2.0f)
+                        [
+                            SNew(SNumericEntryBox<float>)
+                                .Value(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    GetBrushRadius)
+                                .OnValueChanged(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnBrushRadiusChanged)
+                                .MinValue(1.0f)
+                                .MaxValue(512.0f)
+                                .MinSliderValue(1.0f)
+                                .MaxSliderValue(128.0f)
+                        ]
+                ]
+
+            // -----------------------------------------------------------------
+            // 清空
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
+                .AutoHeight()
+                .Padding(2.0f)
+                [
+                    SNew(SHorizontalBox)
+
+                        + SHorizontalBox::Slot()
+                        .AutoWidth()
+                        .Padding(2.0f)
+                        [
+                            SNew(SButton)
+                                .Text(LOCTEXT(
+                                    "ClearBlackButton",
+                                    "Clear Black"))
+                                .OnClicked(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnClearPainterBlackClicked)
+                        ]
+
+                    + SHorizontalBox::Slot()
+                        .AutoWidth()
+                        .Padding(2.0f)
+                        [
+                            SNew(SButton)
+                                .Text(LOCTEXT(
+                                    "ClearWhiteButton",
+                                    "Clear White"))
+                                .OnClicked(
+                                    this,
+                                    &SFaceSDFGeneratorWindow::
+                                    OnClearPainterWhiteClicked)
+                        ]
                 ]
 
             + SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(20.0f)
-                .HAlign(HAlign_Center)
+                .Padding(2.0f)
                 [
-                    SNew(SButton)
-                        .Text(LOCTEXT("GenerateBtn", "Generate SDF"))
-                        .OnClicked(
-                            FOnClicked::CreateSP(
-                                this,
-                                &SFaceSDFGeneratorWindow::OnGenerateClicked))
+                    SNew(STextBlock)
+                        .Text(
+                            this,
+                            &SFaceSDFGeneratorWindow::
+                            GetPainterStatusText)
                 ]
-            //生成Atlas
-            + SVerticalBox::Slot()
+
+            // -----------------------------------------------------------------
+            // Painter画布
+            // -----------------------------------------------------------------
+
+            +SVerticalBox::Slot()
                 .AutoHeight()
-                .Padding(20.0f)
                 .HAlign(HAlign_Center)
+                .Padding(4.0f)
                 [
-                    SNew(SButton)
-                        .Text(LOCTEXT(
-                            "GenerateAtlasBtn",
-                            "Generate SDF Atlas From Mesh"))
-                        .OnClicked(
-                            FOnClicked::CreateSP(
-                                this,
-                                &SFaceSDFGeneratorWindow::OnGenerateAtlasClicked))
+                    SNew(SBox)
+                        .WidthOverride(
+                            FaceSDFWindowConstants::
+                            PainterPreviewSize)
+                        .HeightOverride(
+                            FaceSDFWindowConstants::
+                            PainterPreviewSize)
+                        [
+                            SAssignNew(
+                                PainterWidget,
+                                SFaceSDFPainter)
+                                .Model(&PainterModel)
+                        ]
                 ]
         ];
 }
 
+// =============================================================================
+// 状态UI
+// =============================================================================
 
-FReply SFaceSDFGeneratorWindow::OnGenerateClicked()
+TSharedRef<SWidget>
+SFaceSDFGeneratorWindow::BuildStatusPanel()
 {
-    // 获取选中模型的面部三角形
-    TArray<FFaceSDFTriangle> FaceTriangles;
+    return
+        SNew(SBorder)
+        .Padding(8.0f)
+        [
+            SNew(STextBlock)
+                .Text_Lambda(
+                    [this]()
+                    {
+                        return FText::FromString(
+                            StatusMessage);
+                    })
+                .ColorAndOpacity_Lambda(
+                    [this]()
+                    {
+                        if (bLastStatusWasError)
+                        {
+                            return FSlateColor(
+                                FLinearColor::Red);
+                        }
 
-    if (!FFaceSDFGenerator::ExtractFaceTriangles(
-        SelectedMesh.Get(),
-        LODIndex,
-        SectionIndex,
-        UVChannel,
-        FaceTriangles))
-    {
-        UE_LOG(
-            LogTemp,
-            Error,
-            TEXT("Face SDF: Failed to extract face triangles."));
-
-        return FReply::Handled();
-    }
-
-    TArray<FVector3f> LightDirections;
-    TArray<FString> OutputNames;
-
-    // 第一张：正上方光源
-    LightDirections.Add(
-        FVector3f(0.0f, 0.0f, 1.0f));
-
-    OutputNames.Add(
-        TEXT("FaceShadow_01_01"));
-
-    // 中间7行的俯仰角
-    const float PitchAngles[] =
-    {
-        67.5f,
-        45.0f,
-        22.5f,
-        0.0f,
-        -22.5f,
-        -45.0f,
-        -67.5f
-    };
-
-    // 每行从左到右的9个水平角
-    const float YawAngles[] =
-    {
-        -90.0f,
-        -67.5f,
-        -45.0f,
-        -22.5f,
-        0.0f,
-        22.5f,
-        45.0f,
-        67.5f,
-        90.0f
-    };
-
-    // 生成中间7行，每行9个方向
-    for (int32 PitchIndex = 0;
-        PitchIndex < 7;
-        ++PitchIndex)
-    {
-        // Atlas中的实际行号为2～8
-        const int32 Row =
-            PitchIndex + 2;
-
-        for (int32 YawIndex = 0;
-            YawIndex < 9;
-            ++YawIndex)
-        {
-            // Atlas中的实际列号为1～9
-            const int32 Column =
-                YawIndex + 1;
-
-            LightDirections.Add(
-                MakeFaceSDFLightDirection(
-                    YawAngles[YawIndex],
-                    PitchAngles[PitchIndex]));
-
-            OutputNames.Add(
-                FString::Printf(
-                    TEXT("FaceShadow_%02d_%02d"),
-                    Row,
-                    Column));
-        }
-    }
-
-    // 最后一张：正下方光源
-    LightDirections.Add(
-        FVector3f(0.0f, 0.0f, -1.0f));
-
-    OutputNames.Add(
-        TEXT("FaceShadow_09_01"));
-
-    if (LightDirections.Num() != 65 ||
-        OutputNames.Num() != 65)
-    {
-        UE_LOG(
-            LogTemp,
-            Error,
-            TEXT("Face SDF: Invalid light direction count."));
-
-        return FReply::Handled();
-    }
-
-    int32 GeneratedCount = 0;
-
-    // 根据所有方向依次生成Shadow Mask
-    for (int32 LightIndex = 0;
-        LightIndex < LightDirections.Num();
-        ++LightIndex)
-    {
-        TArray<uint8> ShadowMaskPixels;
-
-        if (!FFaceSDFGenerator::RasterizeShadowMask(
-            FaceTriangles,
-            LightDirections[LightIndex],
-            Resolution,
-            ShadowMaskPixels))
-        {
-            UE_LOG(
-                LogTemp,
-                Error,
-                TEXT("Face SDF: Failed to generate Shadow Mask %d."),
-                LightIndex);
-
-            continue;
-        }
-
-        if (!FFaceSDFTexture::SaveFaceMaskTexture(
-            ShadowMaskPixels,
-            Resolution,
-            OutputNames[LightIndex]))
-        {
-            UE_LOG(
-                LogTemp,
-                Error,
-                TEXT("Face SDF: Failed to save %s."),
-                *OutputNames[LightIndex]);
-
-            continue;
-        }
-
-        ++GeneratedCount;
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Generated %s, Direction=(%f, %f, %f)"),
-            *OutputNames[LightIndex],
-            LightDirections[LightIndex].X,
-            LightDirections[LightIndex].Y,
-            LightDirections[LightIndex].Z);
-    }
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("Face SDF: Lighting generation completed. %d / %d generated."),
-        GeneratedCount,
-        LightDirections.Num());
-
-    return FReply::Handled();
+                        return FSlateColor(
+                            FLinearColor::White);
+                    })
+        ];
 }
 
-FReply SFaceSDFGeneratorWindow::OnGenerateAtlasClicked()
+// =============================================================================
+// 模型设置
+// =============================================================================
+
+void SFaceSDFGeneratorWindow::OnMeshChanged(
+    const FAssetData& AssetData)
 {
-    if (!SelectedMesh.IsValid())
+    SelectedMesh =
+        Cast<USkeletalMesh>(
+            AssetData.GetAsset());
+
+    if (SelectedMesh.IsValid())
     {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Please select a Skeletal Mesh."));
-
-        return FReply::Handled();
+        SetStatus(
+            FString::Printf(
+                TEXT("Selected mesh: %s"),
+                *SelectedMesh->GetName()));
     }
-
-    if (Resolution <= 0)
+    else
     {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Invalid resolution."));
-
-        return FReply::Handled();
+        SetStatus(
+            TEXT("No mesh selected."));
     }
-
-    // 只需要从模型提取一次三角形
-    TArray<FFaceSDFTriangle> FaceTriangles;
-
-    if (!FFaceSDFGenerator::ExtractFaceTriangles(
-        SelectedMesh.Get(),
-        LODIndex,
-        SectionIndex,
-        UVChannel,
-        FaceTriangles))
-    {
-        UE_LOG(
-            LogTemp,
-            Error,
-            TEXT("Face SDF: Failed to extract face triangles."));
-
-        return FReply::Handled();
-    }
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT(
-            "Face SDF: Starting direct Atlas generation. "
-            "Triangles=%d Resolution=%d."),
-        FaceTriangles.Num(),
-        Resolution);
-
-    TArray<uint8> AtlasPixels;
-    int32 AtlasResolution = 0;
-
-    // 直接通过模型生成65个方向的SDF Atlas
-    if (!GenerateSDFAtlas(
-        FaceTriangles,
-        Resolution,
-        AtlasPixels,
-        AtlasResolution))
-    {
-        UE_LOG(
-            LogTemp,
-            Error,
-            TEXT("Face SDF: Failed to generate SDF Atlas."));
-
-        return FReply::Handled();
-    }
-
-    FString AtlasAssetName = OutputName;
-
-    if (AtlasAssetName.IsEmpty())
-    {
-        AtlasAssetName =
-            TEXT("FaceSDF_Atlas");
-    }
-
-    if (!SaveSDFAtlasTexture(
-        AtlasPixels,
-        AtlasResolution,
-        AtlasAssetName))
-    {
-        UE_LOG(
-            LogTemp,
-            Error,
-            TEXT("Face SDF: Failed to save SDF Atlas."));
-
-        return FReply::Handled();
-    }
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT(
-            "Face SDF: Atlas generation completed successfully. "
-            "Asset=%s Resolution=%d."),
-        *AtlasAssetName,
-        AtlasResolution);
-
-    return FReply::Handled();
 }
 
-
-void SFaceSDFGeneratorWindow::OnMeshChanged(const FAssetData& AssetData)
-{
-    // 当用户选择了一个 Mesh 时触发
-    SelectedMesh = Cast<USkeletalMesh>(AssetData.GetAsset());
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("Mesh changed to: %s"),
-        SelectedMesh.IsValid()
-        ? *SelectedMesh->GetName()
-        : TEXT("None"));
-}
-
-
-FString SFaceSDFGeneratorWindow::GetSelectedMeshAsset() const
+FString
+SFaceSDFGeneratorWindow::GetSelectedMeshAsset() const
 {
     if (SelectedMesh.IsValid())
     {
-        // 返回资源的路径字符串，UI 就会显示它
         return SelectedMesh->GetPathName();
     }
 
-    return FString(); // 空字符串，UI 就会显示 None
+    return FString();
 }
 
-
-//各种数值的获取和设置
-
-TOptional<int32> SFaceSDFGeneratorWindow::GetLODValue() const
+TOptional<int32>
+SFaceSDFGeneratorWindow::GetLODValue() const
 {
     return LODIndex;
 }
 
-
-void SFaceSDFGeneratorWindow::OnLODChanged(int32 NewValue)
+void SFaceSDFGeneratorWindow::OnLODChanged(
+    int32 NewValue)
 {
-    LODIndex = NewValue;
+    LODIndex =
+        FMath::Max(
+            0,
+            NewValue);
 }
 
-
-TOptional<int32> SFaceSDFGeneratorWindow::GetSectionValue() const
+TOptional<int32>
+SFaceSDFGeneratorWindow::GetSectionValue() const
 {
     return SectionIndex;
 }
 
-
-void SFaceSDFGeneratorWindow::OnSectionChanged(int32 NewValue)
+void SFaceSDFGeneratorWindow::OnSectionChanged(
+    int32 NewValue)
 {
-    SectionIndex = NewValue;
+    SectionIndex =
+        FMath::Max(
+            0,
+            NewValue);
 }
 
-
-TOptional<int32> SFaceSDFGeneratorWindow::GetUVChannelValue() const
+TOptional<int32>
+SFaceSDFGeneratorWindow::GetUVChannelValue() const
 {
     return UVChannel;
 }
 
-
-void SFaceSDFGeneratorWindow::OnUVChannelChanged(int32 NewValue)
+void SFaceSDFGeneratorWindow::OnUVChannelChanged(
+    int32 NewValue)
 {
-    UVChannel = NewValue;
+    UVChannel =
+        FMath::Max(
+            0,
+            NewValue);
 }
 
-
-TOptional<int32> SFaceSDFGeneratorWindow::GetResolutionValue() const
+TOptional<int32>
+SFaceSDFGeneratorWindow::GetResolutionValue() const
 {
     return Resolution;
 }
 
-
-void SFaceSDFGeneratorWindow::OnResolutionChanged(int32 NewValue)
+void SFaceSDFGeneratorWindow::OnResolutionChanged(
+    int32 NewValue)
 {
-    Resolution = NewValue;
+    Resolution =
+        FMath::Clamp(
+            NewValue,
+            FaceSDFWindowConstants::
+            MinimumResolution,
+            FaceSDFWindowConstants::
+            MaximumResolution);
 }
 
-
-// OutputName 文本双向绑定
-FText SFaceSDFGeneratorWindow::GetOutputNameText() const
+FText
+SFaceSDFGeneratorWindow::GetOutputNameText() const
 {
-    return FText::FromString(OutputName);
+    return FText::FromString(
+        OutputName);
 }
 
-
-void SFaceSDFGeneratorWindow::OnOutputNameChanged(const FText& NewText)
+void SFaceSDFGeneratorWindow::OnOutputNameChanged(
+    const FText& NewText)
 {
-    OutputName = NewText.ToString();
+    OutputName =
+        NewText.ToString();
 }
 
+// =============================================================================
+// Pipeline Request
+// =============================================================================
 
-// ===== Shadow Mask 批量导入 =====
-
-FReply SFaceSDFGeneratorWindow::OnSelectShadowMasksClicked()
+bool SFaceSDFGeneratorWindow::BuildPipelineRequest(
+    FFaceSDFPipelineRequest& OutRequest)
 {
+    if (!SelectedMesh.IsValid())
+    {
+        SetStatus(
+            TEXT("Please select a Skeletal Mesh."),
+            true);
+
+        return false;
+    }
+
+    OutRequest.Mesh =
+        SelectedMesh.Get();
+
+    OutRequest.MeshSettings.LODIndex =
+        LODIndex;
+
+    OutRequest.MeshSettings.SectionIndex =
+        SectionIndex;
+
+    OutRequest.MeshSettings.UVChannel =
+        UVChannel;
+
+    OutRequest.GenerationSettings.Resolution =
+        Resolution;
+
+    OutRequest.GenerationSettings.AtlasGridSize =
+        FaceSDFWindowConstants::
+        AtlasGridSize;
+
+    return true;
+}
+
+// =============================================================================
+// 生成Shadow Mask
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnGenerateShadowMasksClicked()
+{
+    FFaceSDFPipelineRequest Request;
+
+    if (!BuildPipelineRequest(Request))
+    {
+        return FReply::Handled();
+    }
+
+    TArray<FFaceSDFGrayImage> Masks;
+
+    TArray<FFaceSDFLightSample> Samples;
+
+    const FFaceSDFOperationResult Result =
+        FFaceSDFPipeline::GenerateShadowMasks(
+            Request,
+            Masks,
+            Samples);
+
+    if (!Result.bSucceeded)
+    {
+        SetStatus(
+            Result.ErrorMessage,
+            true);
+
+        return FReply::Handled();
+    }
+
+    const FString OutputDirectory =
+        GetShadowMaskOutputDirectory();
+
+    IFileManager::Get().MakeDirectory(
+        *OutputDirectory,
+        true);
+
+    int32 SavedCount = 0;
+
+    for (int32 ImageIndex = 0;
+        ImageIndex < Masks.Num();
+        ++ImageIndex)
+    {
+        if (!Samples.IsValidIndex(
+            ImageIndex))
+        {
+            SetStatus(
+                TEXT(
+                    "Light sample count does not match mask count."),
+                true);
+
+            return FReply::Handled();
+        }
+
+        const FString FilePath =
+            FPaths::Combine(
+                OutputDirectory,
+                Samples[ImageIndex]
+                .OutputName +
+                TEXT(".png"));
+
+        FString Error;
+
+        if (!FFaceSDFImageIO::SaveGrayscalePNG(
+            FilePath,
+            Masks[ImageIndex],
+            Error))
+        {
+            SetStatus(
+                Error,
+                true);
+
+            return FReply::Handled();
+        }
+
+        ++SavedCount;
+    }
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Generated %d Shadow Mask PNGs: %s"),
+            SavedCount,
+            *OutputDirectory));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// 选择Shadow Mask
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnSelectShadowMasksClicked()
+{
+    TArray<FString> Files;
+
+    if (!OpenPNGFilesDialog(
+        TEXT("Select Shadow Mask PNGs"),
+        true,
+        Files))
+    {
+        return FReply::Handled();
+    }
+
+    Files.Sort();
+
+    SelectedShadowMaskFiles =
+        MoveTemp(Files);
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Selected %d Shadow Mask PNGs."),
+            SelectedShadowMaskFiles.Num()));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// Shadow Mask转SDF
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnConvertMasksToSDFClicked()
+{
+    if (SelectedShadowMaskFiles.IsEmpty())
+    {
+        SetStatus(
+            TEXT(
+                "No Shadow Mask PNGs are selected."),
+            true);
+
+        return FReply::Handled();
+    }
+
+    TArray<FFaceSDFGrayImage> Masks;
+
+    if (!LoadImages(
+        SelectedShadowMaskFiles,
+        Masks))
+    {
+        return FReply::Handled();
+    }
+
+    TArray<FFaceSDFGrayImage> SDFImages;
+
+    const FFaceSDFOperationResult Result =
+        FFaceSDFPipeline::ConvertMasksToSDF(
+            Masks,
+            SDFImages);
+
+    if (!Result.bSucceeded)
+    {
+        SetStatus(
+            Result.ErrorMessage,
+            true);
+
+        return FReply::Handled();
+    }
+
+    const FString OutputDirectory =
+        GetSDFOutputDirectory();
+
+    IFileManager::Get().MakeDirectory(
+        *OutputDirectory,
+        true);
+
+    int32 SavedCount = 0;
+
+    for (int32 ImageIndex = 0;
+        ImageIndex < SDFImages.Num();
+        ++ImageIndex)
+    {
+        if (!SelectedShadowMaskFiles.IsValidIndex(
+            ImageIndex))
+        {
+            SetStatus(
+                TEXT(
+                    "Input file count does not match SDF image count."),
+                true);
+
+            return FReply::Handled();
+        }
+
+        const FString FileName =
+            MakeSDFFileName(
+                SelectedShadowMaskFiles[
+                    ImageIndex]);
+
+        const FString FilePath =
+            FPaths::Combine(
+                OutputDirectory,
+                FileName);
+
+        FString Error;
+
+        if (!FFaceSDFImageIO::SaveGrayscalePNG(
+            FilePath,
+            SDFImages[ImageIndex],
+            Error))
+        {
+            SetStatus(
+                Error,
+                true);
+
+            return FReply::Handled();
+        }
+
+        ++SavedCount;
+    }
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Converted %d Shadow Masks to SDF PNGs: %s"),
+            SavedCount,
+            *OutputDirectory));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// 选择SDF
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnSelectGrayscaleSDFsClicked()
+{
+    TArray<FString> Files;
+
+    if (!OpenPNGFilesDialog(
+        TEXT("Select Grayscale SDF PNGs"),
+        true,
+        Files))
+    {
+        return FReply::Handled();
+    }
+
+    Files.Sort();
+
+    SelectedGrayscaleSDFFiles =
+        MoveTemp(Files);
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Selected %d Grayscale SDF PNGs."),
+            SelectedGrayscaleSDFFiles.Num()));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// 通过65张SDF生成Atlas
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnGenerateAtlasClicked()
+{
+    if (SelectedGrayscaleSDFFiles.Num() !=
+        FaceSDFWindowConstants::
+        ExpectedSampleCount)
+    {
+        SetStatus(
+            FString::Printf(
+                TEXT(
+                    "Atlas requires exactly 65 SDF PNGs. Current: %d"),
+                SelectedGrayscaleSDFFiles.Num()),
+            true);
+
+        return FReply::Handled();
+    }
+
+    TArray<FFaceSDFGrayImage> SDFImages;
+
+    if (!LoadImages(
+        SelectedGrayscaleSDFFiles,
+        SDFImages))
+    {
+        return FReply::Handled();
+    }
+
+    TArray<FFaceSDFLightSample> Samples;
+
+    FFaceSDFLightSampler::BuildDefaultSamples(
+        Samples);
+
+    FFaceSDFGrayImage Atlas;
+
+    const FFaceSDFOperationResult Result =
+        FFaceSDFPipeline::BuildAtlas(
+            SDFImages,
+            Samples,
+            Atlas);
+
+    if (!Result.bSucceeded)
+    {
+        SetStatus(
+            Result.ErrorMessage,
+            true);
+
+        return FReply::Handled();
+    }
+
+    const FString SafeOutputName =
+        GetSafeOutputName();
+
+    const FString PNGPath =
+        FPaths::Combine(
+            GetAtlasOutputDirectory(),
+            SafeOutputName +
+            TEXT(".png"));
+
+    FString Error;
+
+    if (!FFaceSDFImageIO::SaveGrayscalePNG(
+        PNGPath,
+        Atlas,
+        Error))
+    {
+        SetStatus(
+            Error,
+            true);
+
+        return FReply::Handled();
+    }
+
+    if (!FFaceSDFTexture::SaveGrayscaleTexture(
+        Atlas,
+        TEXT("/Game/FaceSDF/Atlas"),
+        SafeOutputName,
+        Error))
+    {
+        SetStatus(
+            Error,
+            true);
+
+        return FReply::Handled();
+    }
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Atlas generated successfully: %s"),
+            *PNGPath));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// 从模型一步生成Atlas
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnGenerateAtlasFromMeshClicked()
+{
+    FFaceSDFPipelineRequest Request;
+
+    if (!BuildPipelineRequest(
+        Request))
+    {
+        return FReply::Handled();
+    }
+
+    FFaceSDFGrayImage Atlas;
+
+    const FFaceSDFOperationResult Result =
+        FFaceSDFPipeline::GenerateAtlasFromMesh(
+            Request,
+            Atlas);
+
+    if (!Result.bSucceeded)
+    {
+        SetStatus(
+            Result.ErrorMessage,
+            true);
+
+        return FReply::Handled();
+    }
+
+    const FString SafeOutputName =
+        GetSafeOutputName();
+
+    const FString PNGPath =
+        FPaths::Combine(
+            GetAtlasOutputDirectory(),
+            SafeOutputName +
+            TEXT(".png"));
+
+    FString Error;
+
+    if (!FFaceSDFImageIO::SaveGrayscalePNG(
+        PNGPath,
+        Atlas,
+        Error))
+    {
+        SetStatus(
+            Error,
+            true);
+
+        return FReply::Handled();
+    }
+
+    if (!FFaceSDFTexture::SaveGrayscaleTexture(
+        Atlas,
+        TEXT("/Game/FaceSDF/Atlas"),
+        SafeOutputName,
+        Error))
+    {
+        SetStatus(
+            Error,
+            true);
+
+        return FReply::Handled();
+    }
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Atlas generated directly from mesh: %s"),
+            *PNGPath));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// 文件选择状态
+// =============================================================================
+
+FText
+SFaceSDFGeneratorWindow::GetShadowMaskStatusText() const
+{
+    return FText::Format(
+        LOCTEXT(
+            "ShadowMaskStatus",
+            "{0} Shadow Mask PNGs selected"),
+        FText::AsNumber(
+            SelectedShadowMaskFiles.Num()));
+}
+
+FText
+SFaceSDFGeneratorWindow::GetGrayscaleSDFStatusText() const
+{
+    return FText::Format(
+        LOCTEXT(
+            "GrayscaleSDFStatus",
+            "{0} Grayscale SDF PNGs selected"),
+        FText::AsNumber(
+            SelectedGrayscaleSDFFiles.Num()));
+}
+
+// =============================================================================
+// Painter导入
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnImportPainterImageClicked()
+{
+    TArray<FString> Files;
+
+    if (!OpenPNGFilesDialog(
+        TEXT("Import PNG into Painter"),
+        false,
+        Files))
+    {
+        return FReply::Handled();
+    }
+
+    if (Files.IsEmpty())
+    {
+        return FReply::Handled();
+    }
+
+    FFaceSDFGrayImage ImportedImage;
+
+    FString Error;
+
+    if (!FFaceSDFImageIO::LoadGrayscalePNG(
+        Files[0],
+        ImportedImage,
+        Error))
+    {
+        SetStatus(
+            Error,
+            true);
+
+        return FReply::Handled();
+    }
+
+    if (!PainterModel.SetImage(
+        MoveTemp(ImportedImage)))
+    {
+        SetStatus(
+            TEXT(
+                "Failed to assign the imported image to Painter."),
+            true);
+
+        return FReply::Handled();
+    }
+
+    PainterSourcePath =
+        Files[0];
+
+    if (PainterWidget.IsValid())
+    {
+        PainterWidget->RefreshPreview();
+    }
+
+    const FFaceSDFGrayImage& Image =
+        PainterModel.GetImage();
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Painter loaded: %s (%d x %d)"),
+            *FPaths::GetCleanFilename(
+                PainterSourcePath),
+            Image.Width,
+            Image.Height));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// Painter保存
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnSavePainterImageClicked()
+{
+    if (!PainterModel.HasValidImage())
+    {
+        SetStatus(
+            TEXT(
+                "Import an image into Painter first."),
+            true);
+
+        return FReply::Handled();
+    }
+
+    FString DefaultFileName =
+        PainterSourcePath.IsEmpty()
+        ? TEXT("PaintedMask.png")
+        : FPaths::GetCleanFilename(
+            PainterSourcePath);
+
+    FString SavePath;
+
+    if (!OpenSavePNGDialog(
+        DefaultFileName,
+        SavePath))
+    {
+        return FReply::Handled();
+    }
+
+    FString Error;
+
+    if (!FFaceSDFImageIO::SaveGrayscalePNG(
+        SavePath,
+        PainterModel.GetImage(),
+        Error))
+    {
+        SetStatus(
+            Error,
+            true);
+
+        return FReply::Handled();
+    }
+
+    SetStatus(
+        FString::Printf(
+            TEXT(
+                "Painter image saved: %s"),
+            *SavePath));
+
+    return FReply::Handled();
+}
+
+// =============================================================================
+// Painter笔刷
+// =============================================================================
+
+FReply
+SFaceSDFGeneratorWindow::OnSetBlackBrushClicked()
+{
+    PainterModel.SetBrushValue(0);
+
+    SetStatus(
+        TEXT("Painter brush set to black."));
+
+    return FReply::Handled();
+}
+
+FReply
+SFaceSDFGeneratorWindow::OnSetWhiteBrushClicked()
+{
+    PainterModel.SetBrushValue(255);
+
+    SetStatus(
+        TEXT("Painter brush set to white."));
+
+    return FReply::Handled();
+}
+
+FReply
+SFaceSDFGeneratorWindow::OnClearPainterBlackClicked()
+{
+    if (!PainterModel.Fill(0))
+    {
+        SetStatus(
+            TEXT(
+                "Import an image into Painter first."),
+            true);
+
+        return FReply::Handled();
+    }
+
+    if (PainterWidget.IsValid())
+    {
+        PainterWidget->RefreshPreview();
+    }
+
+    SetStatus(
+        TEXT("Painter image cleared to black."));
+
+    return FReply::Handled();
+}
+
+FReply
+SFaceSDFGeneratorWindow::OnClearPainterWhiteClicked()
+{
+    if (!PainterModel.Fill(255))
+    {
+        SetStatus(
+            TEXT(
+                "Import an image into Painter first."),
+            true);
+
+        return FReply::Handled();
+    }
+
+    if (PainterWidget.IsValid())
+    {
+        PainterWidget->RefreshPreview();
+    }
+
+    SetStatus(
+        TEXT("Painter image cleared to white."));
+
+    return FReply::Handled();
+}
+
+TOptional<float>
+SFaceSDFGeneratorWindow::GetBrushRadius() const
+{
+    return PainterModel.GetBrushRadius();
+}
+
+void SFaceSDFGeneratorWindow::OnBrushRadiusChanged(
+    float NewRadius)
+{
+    PainterModel.SetBrushRadius(
+        NewRadius);
+}
+
+FText
+SFaceSDFGeneratorWindow::GetPainterStatusText() const
+{
+    if (!PainterModel.HasValidImage())
+    {
+        return LOCTEXT(
+            "PainterNoImage",
+            "No image loaded.");
+    }
+
+    const FFaceSDFGrayImage& Image =
+        PainterModel.GetImage();
+
+    return FText::Format(
+        LOCTEXT(
+            "PainterImageStatus",
+            "Image size: {0} x {1}, Brush radius: {2}"),
+        FText::AsNumber(Image.Width),
+        FText::AsNumber(Image.Height),
+        FText::AsNumber(
+            PainterModel.GetBrushRadius()));
+}
+
+// =============================================================================
+// 文件对话框
+// =============================================================================
+
+bool SFaceSDFGeneratorWindow::OpenPNGFilesDialog(
+    const FString& DialogTitle,
+    bool bAllowMultiple,
+    TArray<FString>& OutFiles)
+{
+    OutFiles.Reset();
+
     IDesktopPlatform* DesktopPlatform =
         FDesktopPlatformModule::Get();
 
     if (!DesktopPlatform)
     {
-        UE_LOG(LogTemp, Warning,
-            TEXT("Face SDF: Failed to get Desktop Platform."));
-
-        return FReply::Handled();
-    }
-
-   const void* ParentWindowHandle =
-        FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr);
-
-    TArray<FString> SelectedFiles;
-
-    const bool bOpened =
-        DesktopPlatform->OpenFileDialog(
-            ParentWindowHandle,
-            TEXT("Select Shadow Mask PNGs"),
-            FPaths::ProjectDir(),
-            TEXT(""),
-            TEXT("PNG Files (*.png)|*.png"),
-            EFileDialogFlags::Multiple,
-            SelectedFiles);
-
-    if (!bOpened || SelectedFiles.Num() == 0)
-    {
-        return FReply::Handled();
-    }
-
-    // 按文件名排序，保证 Shadow_00 ~ Shadow_64 顺序稳定
-    SelectedFiles.Sort();
-
-    SelectedShadowMaskFiles = MoveTemp(SelectedFiles);
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("Face SDF: Selected %d Shadow Mask files."),
-        SelectedShadowMaskFiles.Num());
-
-    return FReply::Handled();
-}
-
-FText SFaceSDFGeneratorWindow::GetShadowMaskStatusText() const
-{
-    return FText::Format(
-        LOCTEXT(
-            "ShadowMaskStatus",
-            "{0} Shadow Mask files selected"),
-        SelectedShadowMaskFiles.Num());
-}
-
-
-bool SFaceSDFGeneratorWindow::ReadShadowMaskPNG(
-    const FString& FilePath,
-    TArray<uint8>& OutPixels,
-    int32& OutWidth,
-    int32& OutHeight)
-{
-    TArray<uint8> CompressedData;
-
-    if (!FFileHelper::LoadFileToArray(
-        CompressedData,
-        *FilePath))
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to read PNG file: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    IImageWrapperModule& ImageWrapperModule =
-        FModuleManager::LoadModuleChecked<IImageWrapperModule>(
-            TEXT("ImageWrapper"));
-
-    TSharedPtr<IImageWrapper> ImageWrapper =
-        ImageWrapperModule.CreateImageWrapper(
-            EImageFormat::PNG);
-
-    if (!ImageWrapper.IsValid())
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to create PNG image wrapper."));
-
-        return false;
-    }
-
-    if (!ImageWrapper->SetCompressed(
-        CompressedData.GetData(),
-        CompressedData.Num()))
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to decompress PNG: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    OutWidth = ImageWrapper->GetWidth();
-    OutHeight = ImageWrapper->GetHeight();
-
-    TArray64<uint8> RawData;
-
-    if (!ImageWrapper->GetRaw(
-        ERGBFormat::Gray,
-        8,
-        RawData))
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to convert PNG to grayscale: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    if (RawData.Num() == 0)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: PNG raw data is invalid: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    OutPixels.Reset();
-
-    OutPixels.Append(
-        RawData.GetData(),
-        RawData.Num());
-
-    return true;
-}
-
-
-FReply SFaceSDFGeneratorWindow::OnGenerateAllSDFClicked()
-{
-    if (SelectedShadowMaskFiles.Num() == 0)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: No Shadow Mask files selected."));
-
-        return FReply::Handled();
-    }
-
-    int32 GeneratedCount = 0;
-
-    for (int32 FileIndex = 0;
-        FileIndex < SelectedShadowMaskFiles.Num();
-        ++FileIndex)
-    {
-        const FString& FilePath =
-            SelectedShadowMaskFiles[FileIndex];
-
-        TArray<uint8> MaskPixels;
-
-        int32 Width = 0;
-        int32 Height = 0;
-
-        if (!ReadShadowMaskPNG(
-            FilePath,
-            MaskPixels,
-            Width,
-            Height))
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Failed to read Shadow Mask: %s"),
-                *FilePath);
-
-            continue;
-        }
-
-        if (Width != Height)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Shadow Mask is not square: %s"),
-                *FilePath);
-
-            continue;
-        }
-
-        // 使用第一张图片决定SDF分辨率
-        if (FileIndex == 0)
-        {
-            Resolution = Width;
-        }
-
-        if (Width != Resolution ||
-            Height != Resolution)
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Resolution mismatch: %s"),
-                *FilePath);
-
-            continue;
-        }
-
-        TArray<uint8> SDFPixels;
-
-        if (!FFaceSDFGenerator::GenerateGrayscaleSDF(
-            MaskPixels,
-            Resolution,
-            SDFPixels))
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Failed to generate SDF: %s"),
-                *FilePath);
-
-            continue;
-        }
-
-        FString BaseName =
-            FPaths::GetBaseFilename(FilePath);
-
-        FString SDFAssetName;
-
-        if (BaseName.StartsWith(TEXT("Shadow_")))
-        {
-            const FString IndexString =
-                BaseName.RightChop(7);
-
-            SDFAssetName =
-                FString::Printf(
-                    TEXT("SDF_%s"),
-                    *IndexString);
-        }
-        else
-        {
-            SDFAssetName =
-                FString::Printf(
-                    TEXT("SDF_%s"),
-                    *BaseName);
-        }
-
-        if (!FFaceSDFTexture::SaveFaceSDFTexture(
-            SDFPixels,
-            Resolution,
-            SDFAssetName))
-        {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("Face SDF: Failed to save SDF: %s"),
-                *FilePath);
-
-            continue;
-        }
-
-        ++GeneratedCount;
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Generated %s"),
-            *SDFAssetName);
-    }
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("Face SDF: Batch generation completed. %d / %d files generated."),
-        GeneratedCount,
-        SelectedShadowMaskFiles.Num());
-
-    return FReply::Handled();
-}
-
-//生成PNG读取
-bool SFaceSDFGeneratorWindow::LoadPNGAsGrayscale(
-    const FString& FilePath,
-    TArray<uint8>& OutPixels,
-    int32& OutWidth,
-    int32& OutHeight)
-{
-    TArray<uint8> CompressedData;
-
-    if(!FFileHelper::LoadFileToArray(CompressedData, * FilePath))
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to load PNG: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    IImageWrapperModule& ImageWrapperModule =
-        FModuleManager::LoadModuleChecked<IImageWrapperModule>(
-            TEXT("ImagerWrapper")
-        );
-    TSharedPtr<IImageWrapper> ImageWrapper =
-        ImageWrapperModule.CreateImageWrapper(
-            EImageFormat::PNG);
-    if (!ImageWrapper.IsValid())
-    {
-        return false;
-    }
-
-    if (!ImageWrapper->SetCompressed(
-        CompressedData.GetData(),
-        CompressedData.Num()))
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to decode PNG: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    OutWidth = ImageWrapper->GetWidth();
-    OutHeight = ImageWrapper->GetHeight();
-
-    TArray64<uint8> RawData;
-
-    if (!ImageWrapper->GetRaw(
-        ERGBFormat::Gray,
-        8,
-        RawData))
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to convert PNG to grayscale: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    if (RawData.Num() == 0)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: PNG raw data is invalid: %s"),
-            *FilePath);
-
-        return false;
-    }
-
-    OutPixels.Reset();
-
-    OutPixels.Append(
-        RawData.GetData(),
-        RawData.Num());
-
-    return true;
-
-}
-
-bool SFaceSDFGeneratorWindow::GenerateSDFAtlas(
-    const TArray<FFaceSDFTriangle>& FaceTriangles,
-    int32 SDFResolution,
-    TArray<uint8>& OutAtlasPixels,
-    int32& OutAtlasResolution)
-{
-    if (FaceTriangles.Num() == 0)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: No face triangles for Atlas generation."));
-
-        return false;
-    }
-
-    if (SDFResolution <= 0)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Invalid SDF resolution."));
-
-        return false;
-    }
-
-    const int32 AtlasGridSize = 9;
-
-    OutAtlasResolution =
-        SDFResolution * AtlasGridSize;
-
-    const int32 AtlasPixelCount =
-        OutAtlasResolution *
-        OutAtlasResolution;
-
-    // SDF中128表示距离边界为0，因此空白区域初始化为128
-    OutAtlasPixels.Init(
-        128,
-        AtlasPixelCount);
-
-    // 将一张SDF复制到Atlas指定格子
-    auto CopySDFToAtlas =
-        [&](
-            const TArray<uint8>& SDFPixels,
-            int32 TargetRow,
-            int32 TargetColumn) -> bool
-        {
-            if (SDFPixels.Num() !=
-                SDFResolution * SDFResolution)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("Face SDF: Invalid SDF pixel count."));
-
-                return false;
-            }
-
-            if (TargetRow < 0 ||
-                TargetRow >= AtlasGridSize ||
-                TargetColumn < 0 ||
-                TargetColumn >= AtlasGridSize)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("Face SDF: Invalid Atlas position Row=%d Column=%d."),
-                    TargetRow,
-                    TargetColumn);
-
-                return false;
-            }
-
-            for (int32 Y = 0;
-                Y < SDFResolution;
-                ++Y)
-            {
-                for (int32 X = 0;
-                    X < SDFResolution;
-                    ++X)
-                {
-                    const int32 SourceIndex =
-                        Y * SDFResolution + X;
-
-                    const int32 AtlasX =
-                        TargetColumn * SDFResolution + X;
-
-                    const int32 AtlasY =
-                        TargetRow * SDFResolution + Y;
-
-                    const int32 AtlasIndex =
-                        AtlasY * OutAtlasResolution +
-                        AtlasX;
-
-                    OutAtlasPixels[AtlasIndex] =
-                        SDFPixels[SourceIndex];
-                }
-            }
-
-            return true;
-        };
-
-    // 生成单个方向的Shadow Mask和SDF
-    auto GenerateOneSDF =
-        [&](
-            const FVector3f& LightDirection,
-            TArray<uint8>& OutSDFPixels) -> bool
-        {
-            TArray<uint8> ShadowMaskPixels;
-
-            if (!FFaceSDFGenerator::RasterizeShadowMask(
-                FaceTriangles,
-                LightDirection,
-                SDFResolution,
-                ShadowMaskPixels))
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("Face SDF: Failed to generate Shadow Mask."));
-
-                return false;
-            }
-
-            if (!FFaceSDFGenerator::GenerateGrayscaleSDF(
-                ShadowMaskPixels,
-                SDFResolution,
-                OutSDFPixels))
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("Face SDF: Failed to generate grayscale SDF."));
-
-                return false;
-            }
-
-            return true;
-        };
-
-    int32 GeneratedDirectionCount = 0;
-
-    // 第一行：正上方光源
-    {
-        TArray<uint8> TopSDFPixels;
-
-        const FVector3f TopLightDirection(
-            0.0f,
-            0.0f,
-            -1.0f);
-
-        if (!GenerateOneSDF(
-            TopLightDirection,
-            TopSDFPixels))
-        {
-            return false;
-        }
-
-        // 极点水平方向没有区别，因此复制到第一行全部9格
-        for (int32 Column = 0;
-            Column < AtlasGridSize;
-            ++Column)
-        {
-            if (!CopySDFToAtlas(
-                TopSDFPixels,
-                0,
-                Column))
-            {
-                return false;
-            }
-        }
-
-        ++GeneratedDirectionCount;
-    }
-
-    // 中间7行的俯仰角
-    const float PitchAngles[] =
-    {
-        -67.5f,
-        -45.0f,
-        -22.5f,
-        0.0f,
-        22.5f,
-        45.0f,
-        67.5f
-    };
-
-    // 每行从左到右的9个水平角
-    // 水平方向完整旋转360度
-// 360 / 9 = 40度
-    const float YawAngles[] =
-    {
-        0.0f,
-    22.5f,
-    45.0f,
-    67.5f,
-    90.0f,
-    112.5f,
-    135.0f,
-    157.5f,
-    180.0f
-    };
-
-    // 第二行到第八行，每行生成9个方向
-    for (int32 PitchIndex = 0;
-        PitchIndex < 7;
-        ++PitchIndex)
-    {
-        const int32 AtlasRow =
-            PitchIndex + 1;
-
-        for (int32 YawIndex = 0;
-            YawIndex < 9;
-            ++YawIndex)
-        {
-            const int32 AtlasColumn =
-                YawIndex;
-
-            const FVector3f LightDirection =
-                MakeFaceSDFLightDirection(
-                    YawAngles[YawIndex],
-                    PitchAngles[PitchIndex]);
-
-            TArray<uint8> SDFPixels;
-
-            if (!GenerateOneSDF(
-                LightDirection,
-                SDFPixels))
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT(
-                        "Face SDF: Failed at Row=%d Column=%d."),
-                    AtlasRow,
-                    AtlasColumn);
-
-                return false;
-            }
-
-            if (!CopySDFToAtlas(
-                SDFPixels,
-                AtlasRow,
-                AtlasColumn))
-            {
-                return false;
-            }
-
-            ++GeneratedDirectionCount;
-
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT(
-                    "Face SDF: Generated direction %d / 65, Row=%d Column=%d."),
-                GeneratedDirectionCount,
-                AtlasRow,
-                AtlasColumn);
-        }
-    }
-
-    // 最后一行：正下方光源
-    {
-        TArray<uint8> BottomSDFPixels;
-
-        const FVector3f BottomLightDirection(
-            0.0f,
-            0.0f,
-            1.0f);
-
-        if (!GenerateOneSDF(
-            BottomLightDirection,
-            BottomSDFPixels))
-        {
-            return false;
-        }
-
-        // 极点水平方向没有区别，因此复制到最后一行全部9格
-        for (int32 Column = 0;
-            Column < AtlasGridSize;
-            ++Column)
-        {
-            if (!CopySDFToAtlas(
-                BottomSDFPixels,
-                8,
-                Column))
-            {
-                return false;
-            }
-        }
-
-        ++GeneratedDirectionCount;
-    }
-
-    if (GeneratedDirectionCount != 65)
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
+        SetStatus(
             TEXT(
-                "Face SDF: Invalid generated direction count: %d."),
-            GeneratedDirectionCount);
+                "Desktop Platform module is unavailable."),
+            true);
 
         return false;
     }
 
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT(
-            "Face SDF: Atlas generated directly from mesh. "
-            "Directions=%d, AtlasResolution=%d."),
-        GeneratedDirectionCount,
-        OutAtlasResolution);
+    const void* ParentWindowHandle =
+        FSlateApplication::Get()
+        .FindBestParentWindowHandleForDialogs(
+            nullptr);
+
+    const uint32 DialogFlags =
+        bAllowMultiple
+        ? static_cast<uint32>(
+            EFileDialogFlags::Multiple)
+        : static_cast<uint32>(
+            EFileDialogFlags::None);
+
+    return DesktopPlatform->OpenFileDialog(
+        ParentWindowHandle,
+        DialogTitle,
+        FPaths::ProjectDir(),
+        TEXT(""),
+        TEXT("PNG Images (*.png)|*.png"),
+        DialogFlags,
+        OutFiles);
+}
+
+bool SFaceSDFGeneratorWindow::OpenSavePNGDialog(
+    const FString& DefaultFileName,
+    FString& OutFilePath)
+{
+    OutFilePath.Reset();
+
+    IDesktopPlatform* DesktopPlatform =
+        FDesktopPlatformModule::Get();
+
+    if (!DesktopPlatform)
+    {
+        SetStatus(
+            TEXT(
+                "Desktop Platform module is unavailable."),
+            true);
+
+        return false;
+    }
+
+    const void* ParentWindowHandle =
+        FSlateApplication::Get()
+        .FindBestParentWindowHandleForDialogs(
+            nullptr);
+
+    TArray<FString> SaveFiles;
+
+    const bool bAccepted =
+        DesktopPlatform->SaveFileDialog(
+            ParentWindowHandle,
+            TEXT("Save PNG"),
+            FPaths::ProjectSavedDir(),
+            DefaultFileName,
+            TEXT("PNG Images (*.png)|*.png"),
+            EFileDialogFlags::None,
+            SaveFiles);
+
+    if (!bAccepted ||
+        SaveFiles.IsEmpty())
+    {
+        return false;
+    }
+
+    OutFilePath =
+        SaveFiles[0];
+
+    if (!OutFilePath.EndsWith(
+        TEXT(".png"),
+        ESearchCase::IgnoreCase))
+    {
+        OutFilePath +=
+            TEXT(".png");
+    }
 
     return true;
 }
 
-//保存Atlas
-bool SFaceSDFGeneratorWindow::SaveSDFAtlasTexture(
-    const TArray<uint8>& Pixels,
-    int32 AtlasResolution,
-    const FString& AssetName)
+// =============================================================================
+// 批量加载图片
+// =============================================================================
+
+bool SFaceSDFGeneratorWindow::LoadImages(
+    const TArray<FString>& FilePaths,
+    TArray<FFaceSDFGrayImage>& OutImages)
 {
-    if (Pixels.Num() !=
-        AtlasResolution * AtlasResolution)
+    OutImages.Reset();
+
+    OutImages.Reserve(
+        FilePaths.Num());
+
+    for (const FString& FilePath :
+        FilePaths)
     {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Invalid Atlas pixel count."));
+        FFaceSDFGrayImage Image;
 
-        return false;
+        FString Error;
+
+        if (!FFaceSDFImageIO::LoadGrayscalePNG(
+            FilePath,
+            Image,
+            Error))
+        {
+            SetStatus(
+                Error,
+                true);
+
+            OutImages.Reset();
+
+            return false;
+        }
+
+        OutImages.Add(
+            MoveTemp(Image));
     }
-    //确定路径以及名称
-    FString SafeAssetName =
-        ObjectTools::SanitizeObjectName(
-            AssetName);
-
-    const FString PackagePath =
-        TEXT("/Game/FaceSDF/") +
-        SafeAssetName;
-    //创建资源包
-    UPackage* Package = CreatePackage(*PackagePath);
-    if (!Package)
-    {
-        return false;
-    }
-
-    UTexture2D* Texture = NewObject<UTexture2D>(
-        Package,
-        *SafeAssetName,
-        RF_Public | RF_Standalone);
-    if (!Texture)
-    {
-        return false;
-    }
-
-    // 初始化纹理源数据
-    Texture->Source.Init(
-        AtlasResolution,
-        AtlasResolution,
-        1,
-        1,
-        TSF_G8);
-
-    uint8* MipData =
-        Texture->Source.LockMip(0);
-
-    FMemory::Memcpy(
-        MipData,
-        Pixels.GetData(),
-        Pixels.Num());
-
-    // 解锁纹理数据
-    Texture->Source.UnlockMip(0);
-
-    // 纹理设置
-    Texture->SRGB = false;
-    Texture->CompressionSettings =
-        TC_Grayscale;
-    Texture->MipGenSettings =
-        TMGS_NoMipmaps;
-    Texture->Filter =
-        TF_Bilinear;
-
-    Texture->UpdateResource();
-
-    FAssetRegistryModule::AssetCreated(
-        Texture);
-
-    Package->MarkPackageDirty();
-
-    const FString PackageFileName =
-        FPackageName::LongPackageNameToFilename(
-            PackagePath,
-            FPackageName::GetAssetPackageExtension());
-
-    FSavePackageArgs SaveArgs;
-
-    SaveArgs.TopLevelFlags =
-        RF_Public | RF_Standalone;
-
-    if (!UPackage::SavePackage(
-        Package,
-        Texture,
-        *PackageFileName,
-        SaveArgs))
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("Face SDF: Failed to save SDF Atlas."));
-
-        return false;
-    }
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("Face SDF: SDF Atlas saved: %s"),
-        *PackagePath);
 
     return true;
+}
 
+// =============================================================================
+// 输出目录
+// =============================================================================
+
+FString
+SFaceSDFGeneratorWindow::
+GetShadowMaskOutputDirectory() const
+{
+    return FPaths::Combine(
+        FPaths::ProjectSavedDir(),
+        TEXT("FaceSDF"),
+        TEXT("ShadowMasks"));
+}
+
+FString
+SFaceSDFGeneratorWindow::
+GetSDFOutputDirectory() const
+{
+    return FPaths::Combine(
+        FPaths::ProjectSavedDir(),
+        TEXT("FaceSDF"),
+        TEXT("GrayscaleSDF"));
+}
+
+FString
+SFaceSDFGeneratorWindow::
+GetAtlasOutputDirectory() const
+{
+    return FPaths::Combine(
+        FPaths::ProjectSavedDir(),
+        TEXT("FaceSDF"),
+        TEXT("Atlas"));
+}
+
+// =============================================================================
+// 文件命名
+// =============================================================================
+
+FString
+SFaceSDFGeneratorWindow::MakeSDFFileName(
+    const FString& ShadowMaskPath) const
+{
+    FString BaseName =
+        FPaths::GetBaseFilename(
+            ShadowMaskPath);
+
+    if (BaseName.StartsWith(
+        TEXT("FaceShadow_")))
+    {
+        BaseName =
+            BaseName.RightChop(11);
+    }
+    else if (BaseName.StartsWith(
+        TEXT("Shadow_")))
+    {
+        BaseName =
+            BaseName.RightChop(7);
+    }
+
+    return FString::Printf(
+        TEXT("SDF_%s.png"),
+        *BaseName);
+}
+
+FString
+SFaceSDFGeneratorWindow::GetSafeOutputName() const
+{
+    FString SafeName =
+        OutputName;
+
+    SafeName.TrimStartAndEndInline();
+
+    SafeName.ReplaceInline(
+        TEXT("/"),
+        TEXT("_"));
+
+    SafeName.ReplaceInline(
+        TEXT("\\"),
+        TEXT("_"));
+
+    SafeName.ReplaceInline(
+        TEXT(":"),
+        TEXT("_"));
+
+    if (SafeName.IsEmpty())
+    {
+        SafeName =
+            TEXT("FaceSDF_Atlas");
+    }
+
+    return SafeName;
+}
+
+// =============================================================================
+// 状态
+// =============================================================================
+
+void SFaceSDFGeneratorWindow::SetStatus(
+    const FString& Message,
+    bool bIsError)
+{
+    StatusMessage =
+        Message;
+
+    bLastStatusWasError =
+        bIsError;
+
+    if (bIsError)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("Face SDF: %s"),
+            *Message);
+    }
+    else
+    {
+        UE_LOG(
+            LogTemp,
+            Display,
+            TEXT("Face SDF: %s"),
+            *Message);
+    }
 }
 
 #undef LOCTEXT_NAMESPACE
