@@ -48,14 +48,14 @@ static void ClearBottomLeftEarUV(
                 const int32 PixelIndex =
                     Y * Resolution + X;
 
-                
+
                 Pixels[PixelIndex] = 0;
             }
         }
     }
 }
 
- bool FFaceSDFGenerator::RayIntersectsTriangle(
+bool FFaceSDFGenerator::RayIntersectsTriangle(
     const FVector3f& RayOrigin,
     const FVector3f& RayDirection,
     const FFaceSDFTriangle& Triangle)
@@ -93,6 +93,232 @@ static void ClearBottomLeftEarUV(
 
     return Distance > 0.0001f;
 }
+
+int32 FFaceSDFGenerator::BuildBVHRecursive(
+    const TArray<FFaceSDFTriangle>& Triangles,
+    const TArray<int32>& TriangleIndices,
+    TArray<FFaceSDFBVHNode>& OutNodes)
+{
+    if (TriangleIndices.IsEmpty())
+    {
+        return INDEX_NONE;
+    }
+
+    for (int32 TriangleIndex : TriangleIndices)
+    {
+        if (!Triangles.IsValidIndex(TriangleIndex))
+        {
+            return INDEX_NONE;
+        }
+    }
+
+    const int32 NodeIndex = OutNodes.AddDefaulted();
+    FFaceSDFBVHNode& Node = OutNodes[NodeIndex];
+
+    FVector3f BoundsMin(
+        TNumericLimits<float>::Max(),
+        TNumericLimits<float>::Max(),
+        TNumericLimits<float>::Max());
+
+    FVector3f BoundsMax(
+        -TNumericLimits<float>::Max(),
+        -TNumericLimits<float>::Max(),
+        -TNumericLimits<float>::Max());
+
+    for (int32 TriangleIndex : TriangleIndices)
+    {
+        const FFaceSDFTriangle& Triangle = Triangles[TriangleIndex];
+        const FVector3f Positions[3] =
+        {
+            Triangle.Position0,
+            Triangle.Position1,
+            Triangle.Position2
+        };//获取三角形顶点位置
+
+        for (const FVector3f& Position : Positions)
+        {
+            BoundsMin.X = FMath::Min(BoundsMin.X, Position.X);
+            BoundsMin.Y = FMath::Min(BoundsMin.Y, Position.Y);
+            BoundsMin.Z = FMath::Min(BoundsMin.Z, Position.Z);
+
+            BoundsMax.X = FMath::Max(BoundsMax.X, Position.X);
+            BoundsMax.Y = FMath::Max(BoundsMax.Y, Position.Y);
+            BoundsMax.Z = FMath::Max(BoundsMax.Z, Position.Z);
+        }//通过遍历三角形的三个顶点，更新包围盒的最小和最大坐标,框住
+    }
+
+    Node.BoundsMin = BoundsMin;
+    Node.BoundsMax = BoundsMax;
+    //Leaf
+    if (TriangleIndices.Num() <= 4)
+    {
+        Node.TriangleIndices = TriangleIndices;
+        return NodeIndex;
+    }//控制树深度,每个叶子节点最多包含4个三角形
+
+    const FVector3f Extent = BoundsMax - BoundsMin;
+
+    int32 SplitAxis = 0;
+
+    if (Extent.Y > Extent.X)
+    {
+        SplitAxis = 1;
+    }
+
+    if (Extent.Z > Extent[SplitAxis])
+    {
+        SplitAxis = 2;
+    }//split类型分类, 根据包围盒的最大边长选择分割轴
+
+    TArray<int32> SortedIndices = TriangleIndices;
+
+    SortedIndices.Sort(
+        [&Triangles, SplitAxis](int32 A, int32 B)
+        {
+            const FFaceSDFTriangle& TA = Triangles[A];
+            const FFaceSDFTriangle& TB = Triangles[B];
+
+            const FVector3f CenterA = (TA.Position0 + TA.Position1 + TA.Position2) / 3.0f;
+            const FVector3f CenterB = (TB.Position0 + TB.Position1 + TB.Position2) / 3.0f;
+            return CenterA[SplitAxis] < CenterB[SplitAxis];
+        });//根据三角形的中心点在分割轴上的位置对三角形索引进行排序
+
+    const int32 Middle = SortedIndices.Num() / 2;//将排序后的三角形索引数组分为两半
+    TArray<int32> LeftIndices;
+    TArray<int32> RightIndices;
+
+    LeftIndices.Append(SortedIndices.GetData(), Middle);
+    RightIndices.Append(SortedIndices.GetData() + Middle, SortedIndices.Num() - Middle);//将前半部分放入LeftIndices，后半部分放入RightIndices
+
+    const int32 LeftChildIndex = BuildBVHRecursive(
+        Triangles,
+        LeftIndices,
+        OutNodes);
+    const int32 RightChildIndex = BuildBVHRecursive(
+        Triangles,
+        RightIndices,//递归构建左右子树
+        OutNodes);
+    OutNodes[NodeIndex].LeftChild = LeftChildIndex;
+    OutNodes[NodeIndex].RightChild = RightChildIndex;//设置当前节点的左右子节点索引
+    return NodeIndex;//返回当前节点的索引
+}
+
+bool FFaceSDFGenerator::RayIntersectAABB(
+    const FVector3f& RayOrigin,
+    const FVector3f& RayDirection,
+    const FVector3f& BoundsMin,
+    const FVector3f& BoundsMax
+)
+{
+    float TMin = 0.0f;
+    float TMax = TNumericLimits<float>::Max();//初始化射线的有效距离范围
+
+    for (int32 Axis = 0; Axis < 3; ++Axis)
+    {
+        if (RayDirection[Axis] == 0.0f)
+        {
+            if (RayOrigin[Axis] < BoundsMin[Axis] ||
+                RayOrigin[Axis] > BoundsMax[Axis])
+            {
+                return false;
+            }
+
+            continue;
+        }//如果射线在当前轴上平行于AABB的面，则检查射线原点是否在AABB的范围内，如果不在则返回false
+
+        const float InvDirection = 1.0f / RayDirection[Axis];
+        float T0 = (BoundsMin[Axis] - RayOrigin[Axis]) *
+            InvDirection;//计算射线与AABB在当前轴上的交点t0和t1
+
+        float T1 = (BoundsMax[Axis] - RayOrigin[Axis]) * InvDirection;
+
+        if (T0 > T1)
+        {
+            Swap(T0, T1);
+        }//确保T0是较小的值，T1是较大的值
+
+        TMin = FMath::Max(TMin, T0);
+        TMax = FMath::Min(TMax, T1);
+
+        if (TMax < TMin)
+        {
+            return false;
+        }//更新TMin和TMax，确保它们在所有轴上都有效，如果在某个轴上TMax小于TMin，则射线与AABB不相交，返回false
+
+    }
+
+    return true;
+}
+
+bool FFaceSDFGenerator::TraceBVH(
+    const FVector3f& RayOrigin,
+    const FVector3f& RayDirection,
+    const TArray<FFaceSDFTriangle>& Triangles,
+    const TArray<FFaceSDFBVHNode>& Nodes,
+    int32 RootNodeIndex,
+    int32 IgnoreTriangleIndex)
+{
+    if (!Nodes.IsValidIndex(RootNodeIndex))
+    {
+        return false;
+    }
+
+    TArray<int32> Stack;
+    Stack.Reserve(64);
+    Stack.Add(RootNodeIndex);//初始化栈并将根节点索引压入栈中
+
+    while (Stack.Num() > 0)
+    {
+        const int32 NodeIndex = Stack.Last();
+        Stack.RemoveAt(Stack.Num() - 1);
+        const FFaceSDFBVHNode& Node = Nodes[NodeIndex];
+
+        if (!RayIntersectAABB(
+            RayOrigin,
+            RayDirection,
+            Node.BoundsMin,
+            Node.BoundsMax
+        ))
+        {
+            continue;
+        }
+
+        if (Node.IsLeaf())
+        {
+            for (int32 TriangleIndex : Node.TriangleIndices)
+            {
+                if (TriangleIndex == IgnoreTriangleIndex)
+                {
+                    continue;
+                }
+
+                if (RayIntersectsTriangle(
+                    RayOrigin,
+                    RayDirection,
+                    Triangles[TriangleIndex]))
+                {
+                    return true;
+                }
+            }
+        }
+        else
+        {
+            if (Node.LeftChild != INDEX_NONE)
+            {
+                Stack.Add(Node.LeftChild);
+            }
+
+            if (Node.RightChild != INDEX_NONE)
+            {
+                Stack.Add(Node.RightChild);
+            }
+        }
+    }
+
+    return false;
+
+}
+
 
 
 bool FFaceSDFGenerator::ExtractFaceTriangles(
@@ -255,6 +481,8 @@ bool FFaceSDFGenerator::ExtractFaceTriangles(
 //模型光栅化
 bool FFaceSDFGenerator::RasterizeShadowMask(
     const TArray<FFaceSDFTriangle>& Triangles,
+    const TArray<FFaceSDFBVHNode>& BVHNodes,
+    int32 RootNodeIndex,
     const FVector3f& LightDirection,
     int32 Resolution,
     TArray<uint8>& OutPixels)
@@ -266,10 +494,17 @@ bool FFaceSDFGenerator::RasterizeShadowMask(
         return false;
     }
 
-    if (Resolution <= 0)//分辨率检查
+    if (Resolution <= 0 || static_cast<int64>(Resolution) * Resolution > MAX_int32)//分辨率检查
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Invalid resolution."));
+        return false;
+    }
+
+    if (!BVHNodes.IsValidIndex(RootNodeIndex))//BVH检查
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("Face SDF: Invalid BVH root node."));
         return false;
     }
 
@@ -278,8 +513,17 @@ bool FFaceSDFGenerator::RasterizeShadowMask(
 
     OutPixels.Init(0, Width * Height);//初始化像素
 
-    for (const FFaceSDFTriangle& Triangle : Triangles)//遍历所有三角形
+    // 一个ShadowMask只使用一个LightDirection，所以只需要Normalize一次
+    const FVector3f L =
+        LightDirection.GetSafeNormal();
+
+    for (int32 TriangleIndex = 0;
+        TriangleIndex < Triangles.Num();
+        ++TriangleIndex)//遍历所有三角形
     {
+        const FFaceSDFTriangle& Triangle =
+            Triangles[TriangleIndex];
+
         const float MinU = FMath::Min3(
             Triangle.UV0.X,
             Triangle.UV1.X,
@@ -388,11 +632,10 @@ bool FFaceSDFGenerator::RasterizeShadowMask(
                             ).GetSafeNormal();
 
                     // 计算当前像素是否朝向光源
-                    const FVector3f L =
-                        LightDirection.GetSafeNormal();
-
                     const float NdotL =
-                        FVector3f::DotProduct(SurfaceNormal, L);
+                        FVector3f::DotProduct(
+                            SurfaceNormal,
+                            L);
 
                     const float LightThreshold = 0.25f;
 
@@ -406,27 +649,26 @@ bool FFaceSDFGenerator::RasterizeShadowMask(
                             Triangle.Position1 * W1 +
                             Triangle.Position2 * W2;
 
-                        const FVector3f RayOrigin = SurfacePosition + SurfaceNormal * 0.01f;
+                        const FVector3f RayOrigin =
+                            SurfacePosition +
+                            SurfaceNormal * 0.01f;
 
-                        for (const FFaceSDFTriangle& OtherTriangle : Triangles)
+                        // 使用BVH寻找可能与Ray相交的三角形
+                        // 最终仍然使用RayIntersectsTriangle进行精确求交
+                        if (TraceBVH(
+                            RayOrigin,
+                            L,
+                            Triangles,
+                            BVHNodes,
+                            RootNodeIndex,
+                            TriangleIndex))
                         {
-                            if (&OtherTriangle == &Triangle)
-                            {
-                                continue;
-                            }
-
-                            if (RayIntersectsTriangle(
-                                RayOrigin,
-                                L,
-                                OtherTriangle))
-                            {
-                                bIsLit = false;
-                                break;
-                            }
+                            bIsLit = false;
                         }
                     }
 
-                    OutPixels[PixelIndex] = bIsLit ? 255 : 0;
+                    OutPixels[PixelIndex] =
+                        bIsLit ? 255 : 0;
                 }
             }
         }
@@ -441,9 +683,10 @@ bool FFaceSDFGenerator::RasterizeShadowMask(
         Warning,
         TEXT(
             "Face SDF: Rasterization finished. "
-            "Resolution=%d, Triangles=%d"),
+            "Resolution=%d, Triangles=%d, BVHNodes=%d"),
         Resolution,
-        Triangles.Num());
+        Triangles.Num(),
+        BVHNodes.Num());
 
     return true;
 }
@@ -454,7 +697,9 @@ bool FFaceSDFGenerator::GenerateGrayscaleSDF(
     int32 Resolution,
     TArray<uint8>& OutPixels)
 {
-    if (MaskPixels.Num() != Resolution * Resolution)
+    if (Resolution <= 0 ||
+        static_cast<int64>(Resolution) * Resolution > MAX_int32 ||
+        MaskPixels.Num() != static_cast<int64>(Resolution) * Resolution)
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Invalid mask size."));
@@ -638,3 +883,4 @@ bool FFaceSDFGenerator::GenerateGrayscaleSDF(
 
     return true;
 }
+

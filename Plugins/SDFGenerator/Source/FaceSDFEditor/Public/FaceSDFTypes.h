@@ -54,6 +54,13 @@ struct FFaceSDFGrayImage
             Width * Height
         );
     }
+
+    void Reset()
+    {
+        Width = 0;
+        Height = 0;
+        Pixels.Reset();
+    }
 };
 //光照采样方向和他在Atlas中的位置
 struct FFaceSDFLightSample
@@ -63,7 +70,7 @@ struct FFaceSDFLightSample
     int32 AtlasColumn = 0;
 
     FString OutputName;
-}
+};
 //模型数据读取
 struct FFaceSDFMeshSettings
 {
@@ -96,7 +103,7 @@ struct FFaceSDFOperationResult
     //如果成功 调用method
     static FFaceSDFOperationResult Success(int32 InSucceededCount = 0)
     {
-        FFacedSDFOperationResult Result;
+        FFaceSDFOperationResult Result;
         Result.bSucceeded = true;
         Result.SucceededCount = InSucceededCount;
 

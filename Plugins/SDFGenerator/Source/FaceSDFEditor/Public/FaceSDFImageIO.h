@@ -8,7 +8,7 @@ class FFaceSDFImageIO
 public:
 	static bool LoadGrayscalePNG(
 		const FString& FilePath,
-		FFAceSDFGrayImage& OutImage,
+		FFaceSDFGrayImage& OutImage,
 		FString& OutError
 	);
 	static bool SaveGrayscalePNG(

@@ -36,15 +36,15 @@ FVector3f FFaceSDFLightSampler::MakeDirection(
         ).GetSafeNormal();
 }//局部坐标系单位向量例子,光照采样方向生成
 
-void FFaceSDFLightSmapler::BuildDefaultSamples(
+void FFaceSDFLightSampler::BuildDefaultSamples(
     TArray<FFaceSDFLightSample>& OutSamples
 )
 {
     OutSamples.Reset();
     OutSamples.Reserve(65);
     {
-        FFaceSDFLightSmaple Sample;
-        Smaple.Direction = Fvector3f(0.0f, 0.0f, 1.0f);
+        FFaceSDFLightSample Sample;
+        Sample.Direction = FVector3f(0.0f, 0.0f, 1.0f);
         Sample.AtlasRow = 0;
         Sample.AtlasColumn = 0;
         Sample.OutputName =
@@ -85,7 +85,7 @@ void FFaceSDFLightSmapler::BuildDefaultSamples(
             ++YawIndex)
         {
             FFaceSDFLightSample Sample;
-            Sample.Direciton = MakeDirection(
+            Sample.Direction = MakeDirection(
                 YawAngles[YawIndex],
                 PitchAngles[PitchIndex]
             );//局部设定光照方向

@@ -3,7 +3,7 @@
 #include "FaceSDFImageIO.h"
 #include "FaceSDFLightSampler.h"
 #include "FaceSDFTexture.h"
-#include "SFaceSDFPainter.h"
+#include "FaceSDFPainter.h"
 
 #include "AssetRegistry/AssetData.h"
 #include "DesktopPlatformModule.h"

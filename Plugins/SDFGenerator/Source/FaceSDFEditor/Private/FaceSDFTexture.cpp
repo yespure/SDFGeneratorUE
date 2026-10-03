@@ -11,14 +11,18 @@
 
 //Mask保存逻辑
 bool FFaceSDFTexture::SaveGrayscaleTexture(
-    const TArray<uint8>& Pixels,
-    int32 Resolution,
-    const FString& AssetName)
+    const FFaceSDFGrayImage& Image,
+    const FString& PackageDirectory,
+    const FString& AssetName,
+    FString& OutError)
 {
-    if (Pixels.Num() != Resolution * Resolution)
+    OutError.Reset();
+
+    if (!Image.IsValid())
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Invalid pixel data size."));
+        OutError = TEXT("Face SDF: Invalid pixel data size.");
         return false;
     }
 
@@ -31,14 +35,20 @@ bool FFaceSDFTexture::SaveGrayscaleTexture(
     }
 
     // 所有Shadow Mask都保存在同一个文件夹中
-    const FString FolderPath =
-        TEXT("/Game/FaceSDF/ShadowMasks");
+    FString FolderPath = PackageDirectory;
+    FolderPath.RemoveFromEnd(TEXT("/"));
 
     // PackageName同时表示资源保存路径和资源名称
     const FString PackageName =
         FolderPath +
         TEXT("/") +
         SafeAssetName;
+
+    if (!FPackageName::IsValidLongPackageName(PackageName))
+    {
+        OutError = TEXT("Invalid texture package path.");
+        return false;
+    }
 
     UPackage* Package =
         CreatePackage(*PackageName);//创建资源包
@@ -47,6 +57,7 @@ bool FFaceSDFTexture::SaveGrayscaleTexture(
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Failed to create package."));
+        OutError = TEXT("Face SDF: Failed to create package.");
         return false;
     }
 
@@ -60,12 +71,13 @@ bool FFaceSDFTexture::SaveGrayscaleTexture(
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Failed to create texture."));
+        OutError = TEXT("Face SDF: Failed to create texture.");
         return false;
     }
 
     Texture->Source.Init(
-        Resolution,
-        Resolution,
+        Image.Width,
+        Image.Height,
         1,
         1,
         TSF_G8);//初始化纹理源数据，设置为灰度图
@@ -77,13 +89,14 @@ bool FFaceSDFTexture::SaveGrayscaleTexture(
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Failed to lock texture data."));
+        OutError = TEXT("Face SDF: Failed to lock texture data.");
         return false;
     }
 
     FMemory::Memcpy(
         MipData,
-        Pixels.GetData(),
-        Pixels.Num());//将像素数据复制到纹理源数据中
+        Image.Pixels.GetData(),
+        Image.Pixels.Num());//将像素数据复制到纹理源数据中
 
     Texture->Source.UnlockMip(0);//解锁纹理数据
 
@@ -106,6 +119,7 @@ bool FFaceSDFTexture::SaveGrayscaleTexture(
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Failed to convert package name."));
+        OutError = TEXT("Face SDF: Failed to convert package name.");
         return false;
     }
 
@@ -123,6 +137,7 @@ bool FFaceSDFTexture::SaveGrayscaleTexture(
     {
         UE_LOG(LogTemp, Warning,
             TEXT("Face SDF: Failed to save texture package."));
+        OutError = TEXT("Face SDF: Failed to save texture package.");
         return false;
     }
 

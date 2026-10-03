@@ -1,4 +1,4 @@
-#include "FaceSDFAtlasBuilder.h"
+#include "AtlasBuilder.h"
 
 bool FFaceSDFAtlasBuilder::Build(
     const TArray<FFaceSDFGrayImage>& Images,
@@ -6,7 +6,6 @@ bool FFaceSDFAtlasBuilder::Build(
     int32 GridSize,
     FFaceSDFGrayImage& OutAtlas,
     FString& OutError)
-)
 {
     OutAtlas.Reset();
     OutError.Reset();
@@ -34,8 +33,10 @@ bool FFaceSDFAtlasBuilder::Build(
 
         return false;
     }//各种安全保护
+
     const int32 TileWidth = Images[0].Width;
-    const int32 TileWidth = Images[0].Height;//第一个Image
+    const int32 TileHeight = Images[0].Height;//第一个Image
+
     if (!Images[0].IsValid())
     {
         OutError =
@@ -43,6 +44,7 @@ bool FFaceSDFAtlasBuilder::Build(
 
         return false;
     }
+
     for (const FFaceSDFGrayImage& Image : Images)
     {
         if (!Image.IsValid() ||
@@ -61,9 +63,12 @@ bool FFaceSDFAtlasBuilder::Build(
         TileHeight * GridSize,
         128);//暂时设定128
 
-    for (int32 ImageIndex = 0; ImageIndex < Images.Num(); ++ImageIndex)
+    for (int32 ImageIndex = 0;
+        ImageIndex < Images.Num();
+        ++ImageIndex)
     {
-        const FFaceSDFLightSample& Sample = Sample[ImageIndex];
+        const FFaceSDFLightSample& Sample = Samples[ImageIndex];
+
         const bool bPole =
             ImageIndex == 0 ||
             ImageIndex == Images.Num() - 1;
@@ -100,9 +105,9 @@ bool FFaceSDFAtlasBuilder::Build(
             return false;
         }
     }
+
     return true;
 }
-
 
 bool FFaceSDFAtlasBuilder::CopyTile(
     const FFaceSDFGrayImage& Source,

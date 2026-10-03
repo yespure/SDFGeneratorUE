@@ -1,6 +1,6 @@
 #include "FaceSDFPipeline.h"
 
-#include "FaceSDFAtlasBuilder.h"
+#include "AtlasBuilder.h"
 #include "FaceSDFGenerator.h"
 #include "FaceSDFLightSampler.h"
 
@@ -76,7 +76,8 @@ FFaceSDFPipeline::GenerateShadowMasks(
 
     TArray<FFaceSDFTriangle> FaceTriangles;
 
-    if (!FFaceSDFGenerator::ExtractFaceTriangles(Request.Mesh,
+    if (!FFaceSDFGenerator::ExtractFaceTriangles(
+        Request.Mesh,
         Request.MeshSettings.LODIndex,
         Request.MeshSettings.SectionIndex,
         Request.MeshSettings.UVChannel,
@@ -85,10 +86,33 @@ FFaceSDFPipeline::GenerateShadowMasks(
         return FFaceSDFOperationResult::Failure(
             TEXT("Failed to extract face triangles."));
     }//调用Generator函数提取面部三角形,并取出
+
     if (FaceTriangles.IsEmpty())
     {
         return FFaceSDFOperationResult::Failure(
             TEXT("The selected mesh section contains no triangles."));
+    }
+
+    TArray<int32> TriangleIndices;
+    TriangleIndices.Reserve(FaceTriangles.Num());
+
+    for (int32 Index = 0; Index < FaceTriangles.Num(); ++Index)
+    {
+        TriangleIndices.Add(Index);
+    }
+
+    TArray<FFaceSDFBVHNode> BVHNodes;
+
+    const int32 RootNodeIndex =
+        FFaceSDFGenerator::BuildBVHRecursive(
+            FaceTriangles,
+            TriangleIndices,
+            BVHNodes);
+
+    if (!BVHNodes.IsValidIndex(RootNodeIndex))
+    {
+        return FFaceSDFOperationResult::Failure(
+            TEXT("Failed to build face BVH."));
     }
 
     FFaceSDFLightSampler::BuildDefaultSamples(
@@ -101,7 +125,7 @@ FFaceSDFPipeline::GenerateShadowMasks(
     }
 
     OutMasks.Reserve(OutSamples.Num());
-        int32 GeneratedCount = 0;
+    int32 GeneratedCount = 0;
 
     for (const FFaceSDFLightSample& Sample : OutSamples)//循环samples进行光栅化,为每个光照方向生成一个阴影遮罩
     {
@@ -110,30 +134,30 @@ FFaceSDFPipeline::GenerateShadowMasks(
             Request.GenerationSettings.Resolution;
         Mask.Height =
             Request.GenerationSettings.Resolution;
-        if (!FFaceSDFGenerator::RasterizeShadowMask(FaceTriangles,
+
+        if (!FFaceSDFGenerator::RasterizeShadowMask(
+            FaceTriangles,
+            BVHNodes,
+            RootNodeIndex,
             Sample.Direction,
             Request.GenerationSettings.Resolution,
             Mask.Pixels))
         {
             return FFaceSDFOperationResult::Failure(
                 FString::Printf(
-                    TEXT(
-                        "Failed to generate Shadow Mask: %s"),
+                    TEXT("Failed to generate Shadow Mask: %s"),
                     *Sample.OutputName));
-        }
-            //调用光栅化
+        }//调用光栅化
 
         if (!Mask.IsValid())
         {
             return FFaceSDFOperationResult::Failure(
                 FString::Printf(
-                    TEXT(
-                        "Generated Shadow Mask is invalid: %s"),
+                    TEXT("Generated Shadow Mask is invalid: %s"),
                     *Sample.OutputName));
         }
 
-        if (Request.GenerationSettings
-            .bClearBottomLeftRegion)
+        if (Request.GenerationSettings.bClearBottomLeftRegion)
         {
             FaceSDFPipelinePrivate::FillUVRegion(
                 Mask,
@@ -142,7 +166,7 @@ FFaceSDFPipeline::GenerateShadowMasks(
                 Request.GenerationSettings.ClearMinV,
                 Request.GenerationSettings.ClearMaxV,
                 0);
-        }//如果需要清理坐下耳朵,选择并进行清理
+        }//如果需要清理左下耳朵,选择并进行清理
 
         OutMasks.Add(
             MoveTemp(Mask));//加入数组
@@ -152,15 +176,13 @@ FFaceSDFPipeline::GenerateShadowMasks(
 
     return FFaceSDFOperationResult::Success(
         GeneratedCount);
-    }
 }
-
 FFaceSDFOperationResult
 FFaceSDFPipeline::ConvertMasksToSDF(
     const TArray<FFaceSDFGrayImage>& Masks,
     TArray<FFaceSDFGrayImage>& OutSDFImages)
 {
-    OutSDFImages.Reset(;
+    OutSDFImages.Reset();
     if(Masks.IsEmpty())
     {
         return FFaceSDFOperationResult::Failure(

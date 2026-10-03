@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 
-#include "FaceSDFPainterModel.h"
+#include "FFaceSDFPainterModel.h"
 #include "FaceSDFPipeline.h"
 #include "FaceSDFTypes.h"
 

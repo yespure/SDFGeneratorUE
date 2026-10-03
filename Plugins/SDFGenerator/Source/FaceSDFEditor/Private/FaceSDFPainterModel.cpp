@@ -1,4 +1,4 @@
-#include "FaceSDFPainterModel.h"
+#include "FFaceSDFPainterModel.h"
 
 bool FFaceSDFPainterModel::SetImage(
     const FFaceSDFGrayImage& InImage)
@@ -81,7 +81,7 @@ bool FFaceSDFPainterModel::PaintAt(
     }
 
     const int32 CenterX = FMath::RoundToInt(ImageX);
-    const int32 CenterY = FMath::RountToInt(ImageY);
+    const int32 CenterY = FMath::RoundToInt(ImageY);
     const int32 IntegerRadius = FMath::Max(
         1,
         FMath::CeilToInt(

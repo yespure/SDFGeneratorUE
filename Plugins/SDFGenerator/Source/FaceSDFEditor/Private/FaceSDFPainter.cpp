@@ -1,6 +1,6 @@
-#include "SFaceSDFPainter.h"
+#include "FaceSDFPainter.h"
 
-#include "FaceSDFPainterModel.h"
+#include "FFaceSDFPainterModel.h"
 
 #include "Engine/Texture2D.h"
 #include "InputCoreTypes.h"
